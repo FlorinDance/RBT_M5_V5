@@ -1,10 +1,10 @@
 //+------------------------------------------------------------------+
-//| RBT_M5_Hybrid_v5.10.1.mq5                                       |
+//| RBT_M5_Hybrid_v5.10.4.mq5                                       |
 //| XGBoost entry direction + frozen hourly Motif risk assessment.   |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "5.101"
-#property description "RBT M5 v5.10.1 - XGBoost + Motif risk + CSV audit"
+#property version   "5.104"
+#property description "RBT M5 v5.10.4 - hybrid + scalper no-profit cut research"
 
 #include <Trade/Trade.mqh>
 #include "XGB_M5_Wrapper.mqh"
@@ -33,6 +33,8 @@ int hBands = INVALID_HANDLE;
 #include "EA_ML_M5_Panel.mqh"
 #include "EA_ML_M5_ML.mqh"
 #include "RBT_Hybrid_CSVLogger.mqh"
+#include "RBT_Hybrid_TrajectoryLogger.mqh"
+#include "RBT_Hybrid_Scalper.mqh"
 #include "EA_ML_M5_PositionManagement.mqh"
 
 bool HybridValidateStartupInputs(string &reason)
@@ -46,6 +48,14 @@ bool HybridValidateStartupInputs(string &reason)
       reason = "XGBoost confidence thresholds must be in [0,1]";
    else if(InpStopLossPips <= 0.0 || InpTakeProfitMoney <= 0.0)
       reason = "SL pips and TP money must be positive";
+   else if(InpHybridFirstProfitEpsilonMoney < 0.0)
+      reason = "First-profit epsilon cannot be negative";
+   else
+   {
+      string scalperReason = "";
+      if(!HybridScalperValidateInputs(scalperReason))
+         reason = scalperReason;
+   }
    return (reason == "OK");
 }
 
@@ -99,16 +109,20 @@ int OnInit()
       return INIT_PARAMETERS_INCORRECT;
    if(!HybridCSVInitialize())
       return INIT_FAILED;
+   if(!HybridTrajectoryInitialize())
+      return INIT_FAILED;
 
-   PrintFormat("RBT M5 HYBRID v5.10.1 ready | XGB BUY=%.3f SELL=%.3f GAP=%.3f | motif=%s | base lot=%.2f fixedSL=%.2f",
+   PrintFormat("RBT M5 HYBRID v5.10.4 ready | mode=%s | XGB BUY=%.3f SELL=%.3f GAP=%.3f | motif=%s | base lot=%.2f fixedSL=%.2f",
+      (InpScalperMode ? "XGB_SCALPER" : "NORMAL_HYBRID"),
       InpMinBuyProb, InpMinSellProb, InpMinDecisionGap,
-      (InpHybridMotifEnable ? "RISK_ACTIVE" : "OFF"),
-      g_runtimeLots, InpStopLossPips);
+      (InpScalperMode ? "BYPASSED" : (InpHybridMotifEnable ? "RISK_ACTIVE" : "OFF")),
+      g_runtimeLots,(InpScalperMode ? InpScalperStopLossPips : InpStopLossPips));
    return INIT_SUCCEEDED;
 }
 
 void OnDeinit(const int reason)
 {
+   HybridTrajectoryShutdown(reason);
    HybridCSVShutdown(reason);
    RBTHybridMotifShutdown(reason);
    PropRiskDeinitialize();
@@ -140,16 +154,19 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
    OnRepeatWideSLBuyAfterFastTPTradeTransaction(trans);
    PropRiskOnTradeTransaction(trans);
    HybridCSVOnTradeTransaction(trans);
+   HybridTrajectoryOnTradeTransaction(trans);
 }
 
 void OnTick()
 {
    // Must observe every real tick; inference itself remains hourly.
    RBTHybridMotifProcessTick();
+   HybridTrajectoryProcessTick();
 
    if(InpShowControlPanel && g_panelVisible && !g_panelCreated)
       PanelCreate();
    const bool propRiskLocked = PropRiskProcess();
+   HybridScalperProcessTick();
    PanelUpdateStatus();
    if(propRiskLocked)
       return;
@@ -157,13 +174,13 @@ void OnTick()
    if(g_runtimeUseMaxLossMoney)
       ManageOpenPositionsMaxLoss();
    ManageOpenPositionsFridayClose();
-   if(g_runtimeManageOpenPositions && g_runtimeUseProfitSteps &&
+   if(!InpScalperMode && g_runtimeManageOpenPositions && g_runtimeUseProfitSteps &&
       InpProfitStepManageEveryTick)
       ManageOpenPositionsProfitSteps();
 
    if(!IsNewBar())
       return;
-   if(g_runtimeManageOpenPositions && g_runtimeUseProfitSteps &&
+   if(!InpScalperMode && g_runtimeManageOpenPositions && g_runtimeUseProfitSteps &&
       !InpProfitStepManageEveryTick)
       ManageOpenPositionsProfitSteps();
 
@@ -232,9 +249,16 @@ void OnTick()
    bool allowTrade = true;
    string hybridReason = "XGBOOST_BASELINE";
    ENUM_RBT_HYBRID_MOTIF_STATE motifState = RBT_HYBRID_MOTIF_UNAVAILABLE;
-   if(InpHybridMotifEnable)
+   if(InpHybridMotifEnable && !InpScalperMode)
       motifState = RBTHybridResolveRisk(decision, lotMultiplier, tpMultiplier,
                                         allowTrade, hybridReason);
+   if(InpScalperMode)
+   {
+      lotMultiplier = 1.0;
+      tpMultiplier = 1.0;
+      allowTrade = true;
+      hybridReason = "SCALPER_XGBOOST_ONLY";
+   }
 
    PrintFormat("HYBRID ENTRY | xgb=%s pS=%.5f pH=%.5f pB=%.5f gap=%.5f | motif=%s age=%.1fm conf=%.4f netATR=%.4f | lot_mult=%.3f tp_mult=%.3f allow=%d reason=%s",
       M5_DecisionName(decision), pSell, pHold, pBuy, gap,
@@ -253,16 +277,21 @@ void OnTick()
    }
 
    const double effectiveLot = NormalizeLotsToSymbol(g_runtimeLots * MathMax(0.0,lotMultiplier));
-   const double effectiveTPMoney = g_runtimeTakeProfitMoney * MathMax(0.0,tpMultiplier);
-   const double auditSLPips = (InpUseDynamicSL ? -1.0 : InpStopLossPips);
+   const double effectiveTPMoney = (InpScalperMode ? InpScalperTakeProfitMoney :
+      g_runtimeTakeProfitMoney * MathMax(0.0,tpMultiplier));
+   const double auditSLPips = (InpScalperMode ? InpScalperStopLossPips :
+      (InpUseDynamicSL ? -1.0 : InpStopLossPips));
    const bool opened = OpenTradeFromDecision(decision, pSell, pHold, pBuy, regPred,
       RSI, MACD_hist, ATR, ADX, CCI, Stochastic, Williams_R,
       Dist_to_support_ATR, Dist_to_resistance_ATR, Ret_3, Ret_12,
       lotMultiplier, tpMultiplier, false, DYN_SL_NORMAL,
-      "HYBRID_RUNTIME_CLASSIFICATION");
+      "HYBRID_RUNTIME_CLASSIFICATION",InpScalperMode,
+      (InpScalperMode ? InpScalperStopLossPips : 0.0),
+      (InpScalperMode ? InpScalperTakeProfitMoney : 0.0));
    HybridCSVLogEntry(decision,pSell,pHold,pBuy,chosen,gap,motifState,
       g_runtimeLots,lotMultiplier,effectiveLot,g_runtimeTakeProfitMoney,
       tpMultiplier,effectiveTPMoney,auditSLPips,allowTrade,hybridReason,
-      opened,(long)trade.ResultRetcode(),trade.ResultOrder(),trade.ResultDeal(),
+      opened,(long)trade.ResultRetcode(),
+      (opened ? trade.ResultOrder() : 0),(opened ? trade.ResultDeal() : 0),
       trade.ResultComment());
 }

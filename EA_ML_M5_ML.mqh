@@ -747,7 +747,10 @@ bool OpenTradeFromDecision(
    double tpMoneyMultiplier,
    bool usePreclassifiedDynamicSL,
    DynamicSLSetupType preclassifiedDynamicSLSetup,
-   string preclassifiedDynamicSLReason
+   string preclassifiedDynamicSLReason,
+   bool scalperMode,
+   double fixedSLOverridePips,
+   double tpMoneyOverride
 )
 {
    if(!g_runtimeAllowNewTrades)
@@ -849,13 +852,15 @@ bool OpenTradeFromDecision(
    if(InpLogDynamicSLDetails)
       Print("DynamicSL classify | ", dynReason);
 
-   if(InpUseDynamicSL && InpSkipUnsafeDynamicSLTrades && setupType == DYN_SL_UNSAFE)
+   if(!scalperMode && InpUseDynamicSL && InpSkipUnsafeDynamicSLTrades &&
+      setupType == DYN_SL_UNSAFE)
    {
       Print("DynamicSL skip trade: setup classified as UNSAFE.");
       return false;
    }
 
-   double finalSLPips = ResolveDynamicSLPips(setupType);
+   double finalSLPips = (fixedSLOverridePips > 0.0 ? fixedSLOverridePips :
+                         ResolveDynamicSLPips(setupType));
 
    trade.SetExpertMagicNumber(InpMagicNumber);
    trade.SetDeviationInPoints(InpDeviationPoints);
@@ -866,13 +871,15 @@ bool OpenTradeFromDecision(
    {
       double entry = ask;
       double sl    = NormalizeDouble(entry - finalSLPips * pip, _Digits);
-      double tpMoney = g_runtimeTakeProfitMoney * MathMax(0.0, tpMoneyMultiplier);
+      double tpMoney = (tpMoneyOverride > 0.0 ? tpMoneyOverride :
+                        g_runtimeTakeProfitMoney * MathMax(0.0, tpMoneyMultiplier));
       double tp    = FindTakeProfitPriceByMoney(ORDER_TYPE_BUY, lots, entry, tpMoney);
 
       PrintFormat("ML BUY | pSell=%.5f pHold=%.5f pBuy=%.5f reg=%.5f | setupType=%d | slPips=%.2f | lots=%.2f tpMoney=%.2f | entry=%.5f sl=%.5f tp=%.5f",
                   pSell, pHold, pBuy, regPred, (int)setupType, finalSLPips, lots, tpMoney, entry, sl, tp);
 
-      ok = trade.Buy(lots, _Symbol, 0.0, sl, tp, "ML_M5_TEST_BUY");
+      ok = trade.Buy(lots, _Symbol, 0.0, sl, tp,
+                     (scalperMode ? "ML_M5_SCALP_BUY" : "ML_M5_TEST_BUY"));
       if(!ok)
          PrintFormat("BUY failed. Retcode=%d | %s", trade.ResultRetcode(), trade.ResultRetcodeDescription());
    }
@@ -880,13 +887,15 @@ bool OpenTradeFromDecision(
    {
       double entry = bid;
       double sl    = NormalizeDouble(entry + finalSLPips * pip, _Digits);
-      double tpMoney = g_runtimeTakeProfitMoney * MathMax(0.0, tpMoneyMultiplier);
+      double tpMoney = (tpMoneyOverride > 0.0 ? tpMoneyOverride :
+                        g_runtimeTakeProfitMoney * MathMax(0.0, tpMoneyMultiplier));
       double tp    = FindTakeProfitPriceByMoney(ORDER_TYPE_SELL, lots, entry, tpMoney);
 
       PrintFormat("ML SELL | pSell=%.5f pHold=%.5f pBuy=%.5f reg=%.5f | setupType=%d | slPips=%.2f | lots=%.2f tpMoney=%.2f | entry=%.5f sl=%.5f tp=%.5f",
                   pSell, pHold, pBuy, regPred, (int)setupType, finalSLPips, lots, tpMoney, entry, sl, tp);
 
-      ok = trade.Sell(lots, _Symbol, 0.0, sl, tp, "ML_M5_TEST_SELL");
+      ok = trade.Sell(lots, _Symbol, 0.0, sl, tp,
+                      (scalperMode ? "ML_M5_SCALP_SELL" : "ML_M5_TEST_SELL"));
       if(!ok)
          PrintFormat("SELL failed. Retcode=%d | %s", trade.ResultRetcode(), trade.ResultRetcodeDescription());
    }

@@ -5,7 +5,7 @@
 #ifndef __RBT_HYBRID_CSV_LOGGER_MQH__
 #define __RBT_HYBRID_CSV_LOGGER_MQH__
 
-#define RBT_HYBRID_CSV_SCHEMA "RBT-M5-HYBRID-EVENT-1"
+#define RBT_HYBRID_CSV_SCHEMA "RBT-M5-HYBRID-EVENT-2"
 
 int g_hybridCSVHandle = INVALID_HANDLE;
 string g_hybridCSVName = "";
@@ -35,11 +35,17 @@ string HybridCSVSafeLabel(string value)
    return value;
 }
 
+string HybridCSVRuntimeLabel()
+{
+   return HybridCSVSafeLabel(InpHybridRunLabel) +
+      (InpScalperMode ? "_SCALPER" : "_NORMAL");
+}
+
 bool HybridCSVInitialize()
 {
    if(!InpHybridCSVEnable)
       return true;
-   const string label = HybridCSVSafeLabel(InpHybridRunLabel);
+   const string label = HybridCSVRuntimeLabel();
    if(StringLen(label) < 1)
    {
       Print("HYBRID CSV invalid empty run label.");
@@ -105,10 +111,11 @@ long HybridCSVLogEntry(const int decision,
    const datetime now = TimeCurrent();
    const double motifAge = (g_hybridMotifLast.valid ?
       (double)(now - g_hybridMotifLast.anchorTime) / 60.0 : -1.0);
-   const long positionId = (dealTicket > 0 ?
-      (long)HistoryDealGetInteger(dealTicket, DEAL_POSITION_ID) : 0);
+   long positionId = 0;
+   if(dealTicket > 0 && HistoryDealSelect(dealTicket))
+      positionId = (long)HistoryDealGetInteger(dealTicket, DEAL_POSITION_ID);
    FileWrite(g_hybridCSVHandle,
-      RBT_HYBRID_CSV_SCHEMA,"5.10.1","ENTRY",
+      RBT_HYBRID_CSV_SCHEMA,"5.10.5","ENTRY",
       TimeToString(now,TIME_DATE|TIME_SECONDS),(long)tick.time_msc,
       g_hybridCSVSignalNumber,_Symbol,"M5",M5_DecisionName(decision),
       DoubleToString(pSell,8),DoubleToString(pHold,8),DoubleToString(pBuy,8),
@@ -150,10 +157,10 @@ void HybridCSVOnTradeTransaction(const MqlTradeTransaction &trans)
    const double fee = HistoryDealGetDouble(trans.deal, DEAL_FEE);
    const double net = profit + commission + swap + fee;
    FileWrite(g_hybridCSVHandle,
-      RBT_HYBRID_CSV_SCHEMA,"5.10.1","CLOSE",
+      RBT_HYBRID_CSV_SCHEMA,"5.10.5","CLOSE",
       TimeToString(dealTime,TIME_DATE|TIME_SECONDS),dealTimeMsc,0,
       _Symbol,"M5","","","","","","","","","","","","","","","",
-      "","","","","","","","","","",0,0,0,trans.deal,positionId,
+      "","","","","","","","","",0,0,0,trans.deal,positionId,
       EnumToString(entry),EnumToString((ENUM_DEAL_REASON)HistoryDealGetInteger(trans.deal,DEAL_REASON)),
       DoubleToString(HistoryDealGetDouble(trans.deal,DEAL_PRICE),_Digits),
       DoubleToString(HistoryDealGetDouble(trans.deal,DEAL_VOLUME),4),

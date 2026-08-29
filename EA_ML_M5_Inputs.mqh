@@ -421,6 +421,24 @@ input double InpLots                = 0.50;   // Initial lot; can also be change
 input double InpTakeProfitMoney     = 25.0;   // Initial TP in account currency; panel-adjustable.
 
 //+------------------------------------------------------------------+
+//| OPTIONAL XGBOOST-ONLY SCALPER
+//| When enabled, XGBoost remains the sole entry authority. Motif does
+//| not scale or block the trade. GUI lot remains authoritative.
+//+------------------------------------------------------------------+
+input group "Optional XGBoost-only scalper"
+input bool   InpScalperMode                   = false;
+input double InpScalperTakeProfitMoney        = 5.00;
+input double InpScalperStopLossPips           = 25.00;
+input int    InpScalperMaximumMinutes         = 30;
+input bool   InpScalperCloseAtTimeout         = true;
+input bool   InpScalperNoProfitCutEnable      = false;
+input double InpScalperNoProfitCutMinutes     = 1.50;
+input bool   InpScalperProfitProtectEnable    = true;
+input double InpScalperProfitProtectArmMoney  = 3.00;
+input double InpScalperProfitProtectFloorMoney= 0.50;
+input bool   InpScalperLog                    = true;
+
+//+------------------------------------------------------------------+
 //| PROP / EVALUATION ACCOUNT RISK GUARD
 //| Optional account-level protection. It never changes the ML signal,
 //| lot or TP. When enabled, it only blocks new entries and can close
@@ -511,16 +529,20 @@ input int    InpMotifLatestFridayEntryHour     = 12;
 
 input group "Hybrid visible risk multipliers"
 input double InpHybridConfirmLotMultiplier     = 1.00;
-input double InpHybridNeutralLotMultiplier     = 0.60;
+input double InpHybridNeutralLotMultiplier     = 1.00;
 input double InpHybridOpposeLotMultiplier      = 0.30;
 input bool   InpHybridSkipStrongOpposition     = false;
-input bool   InpHybridScaleTPWithLot            = true;
+input bool   InpHybridScaleTPWithLot            = false;
 
 input group "Hybrid CSV logger"
 input bool   InpHybridCSVEnable                 = true;
 input bool   InpHybridCSVUseCommonFiles         = true;
-input string InpHybridRunLabel                  = "2026_HYBRID_V5101";
+input string InpHybridRunLabel                  = "2026_HYBRID_V5105";
 input int    InpHybridCSVFlushEveryRows         = 1;
+
+input group "Hybrid trajectory logger"
+input bool   InpHybridTrajectoryEnable          = true;
+input double InpHybridFirstProfitEpsilonMoney   = 0.01;
 
 
 

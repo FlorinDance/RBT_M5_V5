@@ -421,22 +421,22 @@ input double InpLots                = 0.50;   // Initial lot; can also be change
 input double InpTakeProfitMoney     = 25.0;   // Initial TP in account currency; panel-adjustable.
 
 //+------------------------------------------------------------------+
-//| OPTIONAL XGBOOST-ONLY SCALPER
-//| When enabled, XGBoost remains the sole entry authority. Motif does
-//| not scale or block the trade. GUI lot remains authoritative.
+//| NORMAL-RBT MOTIF POLICY LAB
+//| The live/tested position keeps the original RBT management. Two
+//| proportional profit protectors are evaluated in shadow on ticks.
 //+------------------------------------------------------------------+
-input group "Optional XGBoost-only scalper"
-input bool   InpScalperMode                   = false;
-input double InpScalperTakeProfitMoney        = 5.00;
-input double InpScalperStopLossPips           = 25.00;
-input int    InpScalperMaximumMinutes         = 30;
-input bool   InpScalperCloseAtTimeout         = true;
-input bool   InpScalperNoProfitCutEnable      = false;
-input double InpScalperNoProfitCutMinutes     = 1.50;
-input bool   InpScalperProfitProtectEnable    = true;
-input double InpScalperProfitProtectArmMoney  = 3.00;
-input double InpScalperProfitProtectFloorMoney= 0.50;
-input bool   InpScalperLog                    = true;
+input group "Normal RBT Motif policy lab"
+input bool   InpNormalPolicyLabEnable              = true;
+input double InpNormalPrudentAgreeArmPctTP         = 30.0;
+input double InpNormalPrudentAgreeFloorPctTP       = 15.0;
+input double InpNormalPrudentOpposeArmPctTP        = 20.0;
+input double InpNormalPrudentOpposeFloorPctTP      = 8.0;
+input double InpNormalPermissiveAgreeArmPctTP      = 45.0;
+input double InpNormalPermissiveAgreeFloorPctTP    = 22.0;
+input double InpNormalPermissiveOpposeArmPctTP     = 30.0;
+input double InpNormalPermissiveOpposeFloorPctTP   = 12.0;
+input bool   InpNormalPolicyLabLog                  = true;
+
 
 //+------------------------------------------------------------------+
 //| PROP / EVALUATION ACCOUNT RISK GUARD
@@ -509,17 +509,21 @@ input bool   InpUseConfidenceFilter  = true;
 input bool   InpLogConfidenceDetails = false;
 
 //+------------------------------------------------------------------+
-//| HYBRID XGBOOST + MOTIF RISK LAYER
+//| HYBRID XGBOOST + MOTIF QUALITY RISK
 //| XGBoost remains the only entry-direction authority. Motif never
-//| reverses a signal; it only selects a visible lot/TP multiplier.
+//| reverses a signal. It grades quality, exposure and exit protection.
 //+------------------------------------------------------------------+
 input group "Hybrid XGBoost + Motif risk"
 input bool   InpHybridMotifEnable              = true;
 input bool   InpHybridMotifLog                 = true;
 input int    InpHybridMotifMaximumAgeMinutes   = 75;
-input double InpMotifDirectionConfidence       = 0.52;
-input double InpMotifMinimumPredictedNetATR    = 0.60;
-input double InpMotifMinimumGrossToCostRatio   = 1.50;
+input double InpMotifDirectionConfidence       = 0.52; // HIGH minimum confidence.
+input double InpMotifMinimumPredictedNetATR    = 0.60; // HIGH minimum expected net ATR.
+input double InpMotifMinimumGrossToCostRatio   = 1.50; // HIGH minimum gross/cost ratio.
+input double InpMotifMediumDirectionConfidence = 0.52;
+input double InpMotifMediumPredictedNetATR      = 0.40;
+input double InpMotifMediumGrossToCostRatio     = 1.00;
+input bool   InpMotifQualityUseHardCostGates   = false;
 input double InpMotifMaximumSelectionCostATR   = 0.15;
 input double InpMotifMaximumSpreadPips         = 1.20;
 input double InpMotifSpreadMultiplier          = 1.20;
@@ -527,22 +531,32 @@ input double InpMotifCommissionRoundTurnPips   = 0.70;
 input double InpMotifSlippageRoundTurnPips     = 0.20;
 input int    InpMotifLatestFridayEntryHour     = 12;
 
-input group "Hybrid visible risk multipliers"
-input double InpHybridConfirmLotMultiplier     = 1.00;
-input double InpHybridNeutralLotMultiplier     = 1.00;
-input double InpHybridOpposeLotMultiplier      = 0.30;
-input bool   InpHybridSkipStrongOpposition     = false;
-input bool   InpHybridScaleTPWithLot            = false;
+input group "Motif quality lot multipliers"
+input double InpHybridHighQualityLotMultiplier = 1.00;
+input double InpHybridMediumQualityLotMultiplier=0.00;
+input double InpHybridLowQualityLotMultiplier  = 0.00;
+input double InpHybridUnavailableLotMultiplier = 0.00;
+input bool   InpHybridScaleTPWithLot            = true;
 
 input group "Hybrid CSV logger"
 input bool   InpHybridCSVEnable                 = true;
 input bool   InpHybridCSVUseCommonFiles         = true;
-input string InpHybridRunLabel                  = "2026_HYBRID_V5105";
+input string InpHybridRunLabel                  = "2026_V5115";
 input int    InpHybridCSVFlushEveryRows         = 1;
 
 input group "Hybrid trajectory logger"
 input bool   InpHybridTrajectoryEnable          = true;
 input double InpHybridFirstProfitEpsilonMoney   = 0.01;
+
+input group "Trade manager ML dataset"
+input bool   InpManagerDatasetEnable             = true;
+input int    InpManagerDatasetSampleSeconds      = 60;
+input bool   InpManagerDatasetLog                = true;
+
+input group "Entry Risk Manager ML — shadow only"
+input bool   InpRiskManagerShadowEnable          = true;
+input double InpRiskManagerThreshold             = 0.30; // Frozen validation value.
+input double InpRiskManagerReducedLotMultiplier  = 0.25; // Recommended fraction of opened lot.
 
 
 
@@ -1429,3 +1443,16 @@ bool   InpDynSL_LogLateSessionWeakWideSLBuyReclassify = false;
 
 
 #endif // __EA_ML_M5_INPUTS_MQH__
+
+// V5.10.14: mutually exclusive live management modes. Monetary values use account currency.
+enum ENUM_RECOVERY_MODE { RECOVERY_NORMAL=0, RECOVERY_ONLY=1, RECOVERY_WITH_TRAIL=2 };
+input group "Recovery management - LIVE orders"
+input ENUM_RECOVERY_MODE InpRecoveryMode=RECOVERY_NORMAL;
+input bool InpRecoveryScaleWithLot=true;
+input double InpRecoveryReferenceLot=0.50;
+input double InpRecoveryLossMoney=20.0;
+input double InpRecoveryArmMoney=10.0;
+input double InpRecoveryFloorMoney=5.0;
+input double InpRecoveryMinMinutes=30.0;
+input double InpRecoveryTrailMinutes=120.0;
+input double InpRecoveryTrailPips=5.0;

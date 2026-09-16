@@ -1,11 +1,11 @@
 //+------------------------------------------------------------------+
 //| RBT_Hybrid_TrajectoryLogger.mqh                                  |
-//| Tick-causal trajectory and Scalper profit-protector audit.       |
+//| Tick-causal trajectory for the normal hybrid audit.              |
 //+------------------------------------------------------------------+
 #ifndef __RBT_HYBRID_TRAJECTORY_LOGGER_MQH__
 #define __RBT_HYBRID_TRAJECTORY_LOGGER_MQH__
 
-#define RBT_HYBRID_TRAJECTORY_SCHEMA "RBT-M5-HYBRID-TRAJECTORY-2"
+#define RBT_HYBRID_TRAJECTORY_SCHEMA "RBT-M5-HYBRID-TRAJECTORY-4"
 
 struct SRBTHybridTrajectory
 {
@@ -15,6 +15,7 @@ struct SRBTHybridTrajectory
    int direction;
    double entryPrice;
    double initialVolume;
+   double riskMultiplier;
    double entryCosts;
    bool firstProfitSeen;
    datetime firstProfitTime;
@@ -35,6 +36,10 @@ struct SRBTHybridTrajectory
    double maxMoney30;
    double maxMoneyLifetime;
    double minMoneyLifetime;
+   bool profitProtectEnabled;
+   string profitProtectPolicy;
+   double profitProtectArmThresholdMoney;
+   double profitProtectFloorMoney;
    bool profitProtectArmed;
    datetime profitProtectArmTime;
    long profitProtectArmTimeMsc;
@@ -63,9 +68,7 @@ int HybridTrajectoryFind(const long positionId)
 
 bool HybridTrajectoryTrackingRequired()
 {
-   return (InpHybridTrajectoryEnable ||
-      (InpScalperMode && (InpScalperNoProfitCutEnable ||
-                          InpScalperProfitProtectEnable)));
+   return InpHybridTrajectoryEnable;
 }
 
 void HybridTrajectorySetRequestedExitPolicy(const long positionId,
@@ -103,6 +106,19 @@ string HybridTrajectoryNumber(const bool available,const double value,const int 
    return (available ? DoubleToString(value,digits) : "");
 }
 
+double HybridTrajectoryMoneyScale(const SRBTHybridTrajectory &t)
+{
+   return (InpHybridScaleTPWithLot ? MathMax(0.0,t.riskMultiplier) : 1.0);
+}
+
+void HybridTrajectoryResolveProfitProtectPolicy(SRBTHybridTrajectory &t)
+{
+   t.profitProtectEnabled = false;
+   t.profitProtectPolicy = "DISABLED";
+   t.profitProtectArmThresholdMoney = 0.0;
+   t.profitProtectFloorMoney = 0.0;
+}
+
 bool HybridTrajectoryInitialize()
 {
    ArrayResize(g_hybridTrajectories,0);
@@ -127,12 +143,13 @@ bool HybridTrajectoryInitialize()
    }
    FileWrite(g_hybridTrajectoryHandle,
       "schema","version","symbol","position_id","direction","open_time",
-      "close_time","entry_price","initial_volume","first_profit_seen",
+      "close_time","entry_price","initial_volume","risk_multiplier","first_profit_seen",
       "first_profit_time","first_profit_minutes","first_profit_money",
       "first_profit_bucket","money_at_5m","money_at_10m","money_at_15m",
       "money_at_30m","max_money_0_5m","max_money_0_10m","max_money_0_15m",
       "max_money_0_30m","max_money_lifetime","min_money_lifetime",
-      "profit_protect_enabled","profit_protect_arm_threshold_money",
+      "profit_protect_enabled","profit_protect_policy",
+      "profit_protect_arm_threshold_money",
       "profit_protect_floor_money","profit_protect_armed",
       "profit_protect_arm_time","profit_protect_arm_minutes",
       "profit_protect_arm_money","exit_request_money",
@@ -163,6 +180,8 @@ void HybridTrajectoryAddEntry(const ulong dealTicket)
    t.direction = (dealType == DEAL_TYPE_BUY ? 1 : -1);
    t.entryPrice = HistoryDealGetDouble(dealTicket,DEAL_PRICE);
    t.initialVolume = HistoryDealGetDouble(dealTicket,DEAL_VOLUME);
+   t.riskMultiplier = (g_runtimeLots > 0.0 ?
+      MathMax(0.0,t.initialVolume/g_runtimeLots) : 1.0);
    t.entryCosts = HistoryDealGetDouble(dealTicket,DEAL_COMMISSION) +
                   HistoryDealGetDouble(dealTicket,DEAL_FEE) +
                   HistoryDealGetDouble(dealTicket,DEAL_SWAP);
@@ -174,6 +193,7 @@ void HybridTrajectoryAddEntry(const ulong dealTicket)
    t.motifConfidence = g_hybridMotifLast.confidence;
    t.motifExpectedNetATR = g_hybridMotifLast.expectedNetATR;
    t.motifGrossCostRatio = g_hybridMotifLast.grossToCostRatio;
+   HybridTrajectoryResolveProfitProtectPolicy(t);
    g_hybridTrajectories[n] = t;
 }
 
@@ -199,19 +219,6 @@ void HybridTrajectoryUpdate(const int index,const long nowMsc)
       t.firstProfitTime = (datetime)(nowMsc/1000);
       t.firstProfitMinutes = elapsed;
       t.firstProfitMoney = money;
-   }
-   if(InpScalperMode && InpScalperProfitProtectEnable &&
-      !t.profitProtectArmed &&
-      money >= InpScalperProfitProtectArmMoney)
-   {
-      t.profitProtectArmed = true;
-      t.profitProtectArmTimeMsc = nowMsc;
-      t.profitProtectArmTime = (datetime)(nowMsc/1000);
-      t.profitProtectArmMinutes = elapsed;
-      t.profitProtectArmMoney = money;
-      if(InpScalperLog)
-         PrintFormat("SCALPER PROFIT_PROTECT ARMED | position=%I64d age=%.3fm profit=%.2f floor=%.2f",
-            t.positionId,elapsed,money,InpScalperProfitProtectFloorMoney);
    }
    if(!t.seen5 && elapsed >= 5.0)   { t.seen5=true;  t.money5=money; }
    if(!t.seen10 && elapsed >= 10.0) { t.seen10=true; t.money10=money; }
@@ -284,30 +291,19 @@ void HybridTrajectoryClose(const int index,const ulong closeDealTicket,
    string exitPolicy = EnumToString(dealReason);
    if(dealReason == DEAL_REASON_TP) exitPolicy = "TP";
    else if(dealReason == DEAL_REASON_SL) exitPolicy = "SL";
-   else if(InpScalperMode && dealReason == DEAL_REASON_EXPERT)
-   {
-      if(StringLen(t.requestedExitPolicy) > 0)
-         exitPolicy = t.requestedExitPolicy;
-      else if(InpScalperNoProfitCutEnable && !t.firstProfitSeen &&
-         closeMinutes >= InpScalperNoProfitCutMinutes &&
-         closeMinutes <= InpScalperNoProfitCutMinutes + 1.0)
-         exitPolicy = "NO_PROFIT_CUT";
-      else if(InpScalperCloseAtTimeout &&
-         closeMinutes >= (double)InpScalperMaximumMinutes - 0.10)
-         exitPolicy = "TIMEOUT";
-      else
-         exitPolicy = "EXPERT_OTHER";
-   }
+   else if(dealReason == DEAL_REASON_EXPERT && StringLen(t.requestedExitPolicy)>0)
+      exitPolicy = t.requestedExitPolicy;
    const int xgbDirection = t.direction;
    const bool motifOppose = (t.motifDirection != 0 && t.motifDirection != xgbDirection);
    const bool passBase = (t.motifConfidence >= InpMotifDirectionConfidence &&
       t.motifGrossCostRatio >= InpMotifMinimumGrossToCostRatio);
    FileWrite(g_hybridTrajectoryHandle,
-      RBT_HYBRID_TRAJECTORY_SCHEMA,"5.10.5",_Symbol,t.positionId,
+      RBT_HYBRID_TRAJECTORY_SCHEMA,"5.10.15",_Symbol,t.positionId,
       (t.direction>0 ? "BUY" : "SELL"),
       TimeToString(t.openTime,TIME_DATE|TIME_SECONDS),
       TimeToString(closeTime,TIME_DATE|TIME_SECONDS),
       DoubleToString(t.entryPrice,_Digits),DoubleToString(t.initialVolume,4),
+      DoubleToString(t.riskMultiplier,6),
       (int)t.firstProfitSeen,
       (t.firstProfitSeen ? TimeToString(t.firstProfitTime,TIME_DATE|TIME_SECONDS) : ""),
       HybridTrajectoryNumber(t.firstProfitSeen,t.firstProfitMinutes,6),
@@ -323,9 +319,9 @@ void HybridTrajectoryClose(const int index,const ulong closeDealTicket,
       HybridTrajectoryNumber(t.maxMoney30>-1.0e307,t.maxMoney30,2),
       HybridTrajectoryNumber(t.maxMoneyLifetime>-1.0e307,t.maxMoneyLifetime,2),
       HybridTrajectoryNumber(t.minMoneyLifetime<1.0e307,t.minMoneyLifetime,2),
-      (int)InpScalperProfitProtectEnable,
-      DoubleToString(InpScalperProfitProtectArmMoney,2),
-      DoubleToString(InpScalperProfitProtectFloorMoney,2),
+      (int)t.profitProtectEnabled,t.profitProtectPolicy,
+      DoubleToString(t.profitProtectArmThresholdMoney,2),
+      DoubleToString(t.profitProtectFloorMoney,2),
       (int)t.profitProtectArmed,
       (t.profitProtectArmed ? TimeToString(t.profitProtectArmTime,TIME_DATE|TIME_SECONDS) : ""),
       HybridTrajectoryNumber(t.profitProtectArmed,t.profitProtectArmMinutes,6),
@@ -340,7 +336,7 @@ void HybridTrajectoryClose(const int index,const ulong closeDealTicket,
       (int)(motifOppose && passBase && t.motifExpectedNetATR>=0.40),
       (int)(motifOppose && passBase && t.motifExpectedNetATR>=0.60),
       exitPolicy,
-      (InpScalperMode ? "XGB_SCALPER" : "NORMAL_HYBRID"),
+      "NORMAL_HYBRID",
       "HYBRID_TEST");
    g_hybridTrajectoryRows++;
    FileFlush(g_hybridTrajectoryHandle);

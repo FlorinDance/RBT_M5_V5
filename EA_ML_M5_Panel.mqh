@@ -751,10 +751,10 @@ void PanelCreate()
          g_runtimeMinBuyProb, g_runtimeMinSellProb, g_runtimeMinDecisionGap), hx, hy, 280, 8, clrBlack); hy += 18;
       PanelCreateLabel("HYBRID_MOTIF", "Motif: hourly engine warming up", hx, hy, 280, 8, clrBlack); hy += 18;
       PanelCreateLabel("HYBRID_SCORE", "Motif score: -", hx, hy, 280, 8, clrBlack); hy += 18;
-      PanelCreateLabel("HYBRID_RISK", StringFormat("Risk mult: confirm %.2f | neutral %.2f | oppose %.2f",
-         InpHybridConfirmLotMultiplier, InpHybridNeutralLotMultiplier,
-         InpHybridOpposeLotMultiplier), hx, hy, 280, 8, clrBlack); hy += 18;
-      PanelCreateLabel("HYBRID_RULE", "Direction: XGBoost only | Motif: risk only", hx, hy, 280, 8, clrDarkGreen, true);
+      PanelCreateLabel("HYBRID_RISK", StringFormat("Risk mult: HIGH %.2f | MED %.2f | LOW %.2f",
+         InpHybridHighQualityLotMultiplier, InpHybridMediumQualityLotMultiplier,
+         InpHybridLowQualityLotMultiplier), hx, hy, 280, 8, clrBlack); hy += 18;
+      PanelCreateLabel("HYBRID_RULE", "Direction: XGBoost | Motif: quality/risk", hx, hy, 280, 8, clrDarkGreen, true);
    }
 
    PanelRefreshControls();
@@ -873,7 +873,7 @@ void PanelUpdateStatus()
       if(g_hybridMotifLast.valid)
       {
          const double hybridPanelAge = (double)(TimeCurrent()-g_hybridMotifLast.anchorTime)/60.0;
-         PanelSetText("HYBRID_MOTIF", StringFormat("Motif: %s | age %.0fm | strong %s",
+         PanelSetText("HYBRID_MOTIF", StringFormat("Motif: %s | age %.0fm | HIGH %s",
             (g_hybridMotifLast.direction > 0 ? "BUY" :
              (g_hybridMotifLast.direction < 0 ? "SELL" : "NONE")),
             hybridPanelAge, (g_hybridMotifLast.strong ? "YES" : "NO")));

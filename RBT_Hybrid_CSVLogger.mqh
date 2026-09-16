@@ -5,7 +5,7 @@
 #ifndef __RBT_HYBRID_CSV_LOGGER_MQH__
 #define __RBT_HYBRID_CSV_LOGGER_MQH__
 
-#define RBT_HYBRID_CSV_SCHEMA "RBT-M5-HYBRID-EVENT-2"
+#define RBT_HYBRID_CSV_SCHEMA "RBT-M5-HYBRID-EVENT-3"
 
 int g_hybridCSVHandle = INVALID_HANDLE;
 string g_hybridCSVName = "";
@@ -38,7 +38,7 @@ string HybridCSVSafeLabel(string value)
 string HybridCSVRuntimeLabel()
 {
    return HybridCSVSafeLabel(InpHybridRunLabel) +
-      (InpScalperMode ? "_SCALPER" : "_NORMAL");
+      "_NORMAL";
 }
 
 bool HybridCSVInitialize()
@@ -115,7 +115,7 @@ long HybridCSVLogEntry(const int decision,
    if(dealTicket > 0 && HistoryDealSelect(dealTicket))
       positionId = (long)HistoryDealGetInteger(dealTicket, DEAL_POSITION_ID);
    FileWrite(g_hybridCSVHandle,
-      RBT_HYBRID_CSV_SCHEMA,"5.10.5","ENTRY",
+      RBT_HYBRID_CSV_SCHEMA,"5.10.15","ENTRY",
       TimeToString(now,TIME_DATE|TIME_SECONDS),(long)tick.time_msc,
       g_hybridCSVSignalNumber,_Symbol,"M5",M5_DecisionName(decision),
       DoubleToString(pSell,8),DoubleToString(pHold,8),DoubleToString(pBuy,8),
@@ -157,7 +157,7 @@ void HybridCSVOnTradeTransaction(const MqlTradeTransaction &trans)
    const double fee = HistoryDealGetDouble(trans.deal, DEAL_FEE);
    const double net = profit + commission + swap + fee;
    FileWrite(g_hybridCSVHandle,
-      RBT_HYBRID_CSV_SCHEMA,"5.10.5","CLOSE",
+      RBT_HYBRID_CSV_SCHEMA,"5.10.15","CLOSE",
       TimeToString(dealTime,TIME_DATE|TIME_SECONDS),dealTimeMsc,0,
       _Symbol,"M5","","","","","","","","","","","","","","","",
       "","","","","","","","","",0,0,0,trans.deal,positionId,

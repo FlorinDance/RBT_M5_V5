@@ -1,6 +1,6 @@
 //+------------------------------------------------------------------+
 //| RBT_Hybrid_MotifRisk.mqh                                         |
-//| Hourly frozen Motif V5.8 assessment used only as XGBoost risk.   |
+//| Hourly Motif V5.8 quality assessment used only as XGBoost risk. |
 //+------------------------------------------------------------------+
 #ifndef __RBT_HYBRID_MOTIF_RISK_MQH__
 #define __RBT_HYBRID_MOTIF_RISK_MQH__
@@ -11,9 +11,9 @@
 enum ENUM_RBT_HYBRID_MOTIF_STATE
 {
    RBT_HYBRID_MOTIF_UNAVAILABLE = 0,
-   RBT_HYBRID_MOTIF_NEUTRAL     = 1,
-   RBT_HYBRID_MOTIF_CONFIRM     = 2,
-   RBT_HYBRID_MOTIF_OPPOSE      = 3
+   RBT_HYBRID_MOTIF_LOW         = 1,
+   RBT_HYBRID_MOTIF_MEDIUM      = 2,
+   RBT_HYBRID_MOTIF_HIGH        = 3
 };
 
 struct SRBTHybridMotifSnapshot
@@ -32,6 +32,7 @@ struct SRBTHybridMotifSnapshot
    double grossToCostRatio;
    double atrPips;
    double spreadPips;
+   bool horizonAllowed;
    bool strong;
 };
 
@@ -86,6 +87,7 @@ void RBTHybridMotifResetSnapshot()
    g_hybridMotifLast.grossToCostRatio = 0.0;
    g_hybridMotifLast.atrPips = 0.0;
    g_hybridMotifLast.spreadPips = 0.0;
+   g_hybridMotifLast.horizonAllowed = false;
    g_hybridMotifLast.strong = false;
 }
 
@@ -94,17 +96,30 @@ bool RBTHybridMotifValidateInputs(string &reason)
    reason = "OK";
    if(InpHybridMotifMaximumAgeMinutes < 1 || InpHybridMotifMaximumAgeMinutes > 1440)
       reason = "Motif maximum age must be in [1,1440] minutes";
-   else if(InpMotifDirectionConfidence < 0.5 || InpMotifDirectionConfidence > 1.0)
-      reason = "Motif confidence must be in [0.5,1.0]";
+   else if(InpMotifDirectionConfidence < 0.5 || InpMotifDirectionConfidence > 1.0 ||
+           InpMotifMediumDirectionConfidence < 0.5 ||
+           InpMotifMediumDirectionConfidence > 1.0)
+      reason = "Motif quality confidence must be in [0.5,1.0]";
    else if(InpMotifMinimumPredictedNetATR < 0.0 ||
+           InpMotifMediumPredictedNetATR < 0.0 ||
            InpMotifMinimumGrossToCostRatio < 0.0 ||
+           InpMotifMediumGrossToCostRatio < 0.0 ||
            InpMotifMaximumSelectionCostATR < 0.0 ||
            InpMotifMaximumSpreadPips < 0.0)
       reason = "Motif gates cannot be negative";
-   else if(InpHybridConfirmLotMultiplier < 0.0 ||
-           InpHybridNeutralLotMultiplier < 0.0 ||
-           InpHybridOpposeLotMultiplier < 0.0)
-      reason = "Hybrid multipliers cannot be negative";
+   else if(InpMotifMediumDirectionConfidence > InpMotifDirectionConfidence ||
+           InpMotifMediumPredictedNetATR > InpMotifMinimumPredictedNetATR ||
+           InpMotifMediumGrossToCostRatio > InpMotifMinimumGrossToCostRatio)
+      reason = "Motif MEDIUM gates cannot be stricter than HIGH gates";
+   else if(InpHybridHighQualityLotMultiplier < 0.0 ||
+           InpHybridHighQualityLotMultiplier > 1.0 ||
+           InpHybridMediumQualityLotMultiplier < 0.0 ||
+           InpHybridMediumQualityLotMultiplier > 1.0 ||
+           InpHybridLowQualityLotMultiplier < 0.0 ||
+           InpHybridLowQualityLotMultiplier > 1.0 ||
+           InpHybridUnavailableLotMultiplier < 0.0 ||
+           InpHybridUnavailableLotMultiplier > 1.0)
+      reason = "Hybrid quality multipliers must be in [0,1]";
    else if(InpMotifLatestFridayEntryHour < 0 || InpMotifLatestFridayEntryHour > 24)
       reason = "Friday hour must be in [0,24]";
    return (reason == "OK");
@@ -195,11 +210,13 @@ bool RBTHybridMotifEvaluate()
    const double expectedNet = gross - costATR;
    const double ratio = (costATR > 0.0 ? gross / costATR : 1.0e308);
    const bool horizon = !(weekday == 4 && hour >= InpMotifLatestFridayEntryHour);
+   const bool hardCostPass = (!InpMotifQualityUseHardCostGates ||
+      (costATR <= InpMotifMaximumSelectionCostATR &&
+       spreadPips <= InpMotifMaximumSpreadPips && horizon));
    const bool strong = (confidence >= InpMotifDirectionConfidence &&
       expectedNet >= InpMotifMinimumPredictedNetATR &&
       ratio >= InpMotifMinimumGrossToCostRatio &&
-      costATR <= InpMotifMaximumSelectionCostATR &&
-      spreadPips <= InpMotifMaximumSpreadPips && horizon && predictedReturn != 0.0);
+      hardCostPass && predictedReturn != 0.0);
 
    g_hybridMotifLast.valid = true;
    g_hybridMotifLast.anchorTime = g_hybridMotifFeatures.LastAnchorTime();
@@ -215,11 +232,12 @@ bool RBTHybridMotifEvaluate()
    g_hybridMotifLast.grossToCostRatio = ratio;
    g_hybridMotifLast.atrPips = atrPips;
    g_hybridMotifLast.spreadPips = spreadPips;
+   g_hybridMotifLast.horizonAllowed = horizon;
    g_hybridMotifLast.strong = strong;
    if(InpHybridMotifLog)
-      PrintFormat("HYBRID MOTIF hourly | %s motif=%d dir=%d conf=%.4f netATR=%.4f strong=%d",
+      PrintFormat("HYBRID MOTIF hourly | %s motif=%d dir=%d conf=%.4f netATR=%.4f ratio=%.3f qualityHigh=%d",
          TimeToString(g_hybridMotifLast.anchorTime, TIME_DATE|TIME_SECONDS), motifId,
-         g_hybridMotifLast.direction, confidence, expectedNet, (int)strong);
+         g_hybridMotifLast.direction, confidence, expectedNet, ratio, (int)strong);
    return true;
 }
 
@@ -237,9 +255,9 @@ void RBTHybridMotifProcessTick()
 
 string RBTHybridMotifStateName(const ENUM_RBT_HYBRID_MOTIF_STATE state)
 {
-   if(state == RBT_HYBRID_MOTIF_CONFIRM) return "CONFIRM";
-   if(state == RBT_HYBRID_MOTIF_OPPOSE) return "OPPOSE";
-   if(state == RBT_HYBRID_MOTIF_NEUTRAL) return "NEUTRAL";
+   if(state == RBT_HYBRID_MOTIF_HIGH) return "QUALITY_HIGH";
+   if(state == RBT_HYBRID_MOTIF_MEDIUM) return "QUALITY_MEDIUM";
+   if(state == RBT_HYBRID_MOTIF_LOW) return "QUALITY_LOW";
    return "UNAVAILABLE";
 }
 
@@ -254,7 +272,7 @@ ENUM_RBT_HYBRID_MOTIF_STATE RBTHybridResolveRisk(
    if(!InpHybridMotifEnable)
       return RBT_HYBRID_MOTIF_UNAVAILABLE;
 
-   ENUM_RBT_HYBRID_MOTIF_STATE state = RBT_HYBRID_MOTIF_NEUTRAL;
+   ENUM_RBT_HYBRID_MOTIF_STATE state = RBT_HYBRID_MOTIF_UNAVAILABLE;
    const datetime now = TimeCurrent();
    const long ageSeconds = (g_hybridMotifLast.valid ?
       (long)(now - g_hybridMotifLast.anchorTime) : 2147483647);
@@ -262,29 +280,41 @@ ENUM_RBT_HYBRID_MOTIF_STATE RBTHybridResolveRisk(
       ageSeconds <= (long)InpHybridMotifMaximumAgeMinutes * 60);
    if(!fresh)
    {
-      lotMultiplier = InpHybridNeutralLotMultiplier;
+      lotMultiplier = InpHybridUnavailableLotMultiplier;
       reason = (g_hybridMotifLast.valid ? "MOTIF_STALE" : "MOTIF_NOT_READY");
-   }
-   else if(!g_hybridMotifLast.strong || g_hybridMotifLast.direction == 0)
-   {
-      lotMultiplier = InpHybridNeutralLotMultiplier;
-      reason = "MOTIF_BELOW_STRONG_GATES";
    }
    else
    {
-      const int xgbDirection = (xgbDecision == 2 ? 1 : -1);
-      if(g_hybridMotifLast.direction == xgbDirection)
+      const bool directionAvailable = (g_hybridMotifLast.direction != 0);
+      const bool hardCostPass = (!InpMotifQualityUseHardCostGates ||
+         (g_hybridMotifLast.costATR <= InpMotifMaximumSelectionCostATR &&
+          g_hybridMotifLast.spreadPips <= InpMotifMaximumSpreadPips &&
+          g_hybridMotifLast.horizonAllowed));
+      const bool highQuality = (directionAvailable && hardCostPass &&
+         g_hybridMotifLast.confidence >= InpMotifDirectionConfidence &&
+         g_hybridMotifLast.expectedNetATR >= InpMotifMinimumPredictedNetATR &&
+         g_hybridMotifLast.grossToCostRatio >= InpMotifMinimumGrossToCostRatio);
+      const bool mediumQuality = (directionAvailable && hardCostPass &&
+         g_hybridMotifLast.confidence >= InpMotifMediumDirectionConfidence &&
+         g_hybridMotifLast.expectedNetATR >= InpMotifMediumPredictedNetATR &&
+         g_hybridMotifLast.grossToCostRatio >= InpMotifMediumGrossToCostRatio);
+      if(highQuality)
       {
-         state = RBT_HYBRID_MOTIF_CONFIRM;
-         lotMultiplier = InpHybridConfirmLotMultiplier;
-         reason = "MOTIF_STRONG_CONFIRM";
+         state = RBT_HYBRID_MOTIF_HIGH;
+         lotMultiplier = InpHybridHighQualityLotMultiplier;
+         reason = "MOTIF_QUALITY_HIGH";
+      }
+      else if(mediumQuality)
+      {
+         state = RBT_HYBRID_MOTIF_MEDIUM;
+         lotMultiplier = InpHybridMediumQualityLotMultiplier;
+         reason = "MOTIF_QUALITY_MEDIUM";
       }
       else
       {
-         state = RBT_HYBRID_MOTIF_OPPOSE;
-         lotMultiplier = InpHybridOpposeLotMultiplier;
-         allowTrade = !InpHybridSkipStrongOpposition;
-         reason = (allowTrade ? "MOTIF_STRONG_OPPOSE_REDUCED" : "MOTIF_STRONG_OPPOSE_SKIP");
+         state = RBT_HYBRID_MOTIF_LOW;
+         lotMultiplier = InpHybridLowQualityLotMultiplier;
+         reason = "MOTIF_QUALITY_LOW";
       }
    }
    lotMultiplier = MathMax(0.0, lotMultiplier);

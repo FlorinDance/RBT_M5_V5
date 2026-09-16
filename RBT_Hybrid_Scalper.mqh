@@ -1,6 +1,6 @@
 //+------------------------------------------------------------------+
 //| RBT_Hybrid_Scalper.mqh                                          |
-//| Optional XGBoost-only fast-exit and profit-protection policy.    |
+//| Optional fast-exit and profit-protection policy.                 |
 //+------------------------------------------------------------------+
 #ifndef __RBT_HYBRID_SCALPER_MQH__
 #define __RBT_HYBRID_SCALPER_MQH__
@@ -28,6 +28,22 @@ bool HybridScalperValidateInputs(string &reason)
       (InpScalperProfitProtectFloorMoney < 0.0 ||
        InpScalperProfitProtectFloorMoney >= InpScalperProfitProtectArmMoney))
       reason = "Profit-protect floor must be non-negative and below arm money";
+   else if(InpScalperProfitProtectEnable && InpScalperMotifAdaptiveProtectEnable &&
+      (InpScalperMotifAgreeArmMoney <= 0.0 ||
+       InpScalperMotifAgreeArmMoney >= InpScalperTakeProfitMoney))
+      reason = "Motif AGREE arm must be positive and below Scalper TP";
+   else if(InpScalperProfitProtectEnable && InpScalperMotifAdaptiveProtectEnable &&
+      (InpScalperMotifAgreeFloorMoney < 0.0 ||
+       InpScalperMotifAgreeFloorMoney >= InpScalperMotifAgreeArmMoney))
+      reason = "Motif AGREE floor must be non-negative and below its arm";
+   else if(InpScalperProfitProtectEnable && InpScalperMotifAdaptiveProtectEnable &&
+      (InpScalperMotifOpposeArmMoney <= 0.0 ||
+       InpScalperMotifOpposeArmMoney >= InpScalperTakeProfitMoney))
+      reason = "Motif OPPOSE arm must be positive and below Scalper TP";
+   else if(InpScalperProfitProtectEnable && InpScalperMotifAdaptiveProtectEnable &&
+      (InpScalperMotifOpposeFloorMoney < 0.0 ||
+       InpScalperMotifOpposeFloorMoney >= InpScalperMotifOpposeArmMoney))
+      reason = "Motif OPPOSE floor must be non-negative and below its arm";
    return (reason == "OK");
 }
 
@@ -56,9 +72,18 @@ void HybridScalperProcessTick()
       const double currentNetMoney = PositionGetDouble(POSITION_PROFIT) +
                                      PositionGetDouble(POSITION_SWAP) + entryCosts;
       bool closeForProfitProtect = false;
-      if(InpScalperProfitProtectEnable && trajectoryIndex >= 0 &&
+      double profitProtectFloorMoney = 0.0;
+      bool profitProtectEnabled = false;
+      if(trajectoryIndex >= 0)
+      {
+         profitProtectEnabled =
+            g_hybridTrajectories[trajectoryIndex].profitProtectEnabled;
+         profitProtectFloorMoney =
+            g_hybridTrajectories[trajectoryIndex].profitProtectFloorMoney;
+      }
+      if(profitProtectEnabled && trajectoryIndex >= 0 &&
          g_hybridTrajectories[trajectoryIndex].profitProtectArmed &&
-         currentNetMoney <= InpScalperProfitProtectFloorMoney)
+         currentNetMoney <= profitProtectFloorMoney)
          closeForProfitProtect = true;
       bool closeForNoProfit = false;
       if(InpScalperNoProfitCutEnable &&

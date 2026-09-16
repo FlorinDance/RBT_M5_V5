@@ -72,11 +72,12 @@ bool   InpV3ShadowP2SellM15BreakEnable          = true;
 bool   InpV3ShadowP2SellM15BreakNoReclaimEnable = true;
 
 // Phase 3 visual overlay. It only draws calculated structure on the chart.
-bool   InpV3OverlayEnable                  = true;
-bool   InpV3OverlayShowInternalSwings      = true;
-bool   InpV3OverlayShowExternalSwings      = true;
-bool   InpV3OverlayShowBOS                 = true;
-bool   InpV3OverlayShowCHOCH               = true;
+input group "Chart structure - visual only"
+input bool InpV3OverlayEnable                  = true;
+input bool InpV3OverlayShowInternalSwings      = true;
+input bool InpV3OverlayShowExternalSwings      = true;
+input bool InpV3OverlayShowBOS                 = true;
+input bool InpV3OverlayShowCHOCH               = true;
 bool   InpV3OverlayShowMTFPanel            = true;
 bool   InpV3OverlayConnectInternalSwings   = true;   // Connect internal pivots with a zig-zag path.
 bool   InpV3OverlayConnectExternalSwings   = true;   // Connect external pivots with a thicker path.
@@ -541,7 +542,7 @@ input bool   InpHybridScaleTPWithLot            = true;
 input group "Hybrid CSV logger"
 input bool   InpHybridCSVEnable                 = true;
 input bool   InpHybridCSVUseCommonFiles         = true;
-input string InpHybridRunLabel                  = "2026_V5115";
+input string InpHybridRunLabel                  = "2026_V5117";
 input int    InpHybridCSVFlushEveryRows         = 1;
 
 input group "Hybrid trajectory logger"
@@ -1447,7 +1448,7 @@ bool   InpDynSL_LogLateSessionWeakWideSLBuyReclassify = false;
 // V5.10.14: mutually exclusive live management modes. Monetary values use account currency.
 enum ENUM_RECOVERY_MODE { RECOVERY_NORMAL=0, RECOVERY_ONLY=1, RECOVERY_WITH_TRAIL=2 };
 input group "Recovery management - LIVE orders"
-input ENUM_RECOVERY_MODE InpRecoveryMode=RECOVERY_NORMAL;
+input ENUM_RECOVERY_MODE InpRecoveryMode=RECOVERY_ONLY;
 input bool InpRecoveryScaleWithLot=true;
 input double InpRecoveryReferenceLot=0.50;
 input double InpRecoveryLossMoney=20.0;
@@ -1456,3 +1457,13 @@ input double InpRecoveryFloorMoney=5.0;
 input double InpRecoveryMinMinutes=30.0;
 input double InpRecoveryTrailMinutes=120.0;
 input double InpRecoveryTrailPips=5.0;
+
+input group "Recovery failure protection - LIVE orders"
+input bool   InpRecoveryFailureProtection=true;
+input double InpRecoveryFailureDelayMinutes=60.0;
+input double InpRecoveryFailureActivationMoney=40.0;
+input double InpRecoveryFailureStopMoney=160.0;
+input double InpRecoveryFailureWindowMinutes=30.0;
+input double InpRecoveryFailureNegativeRatio=0.90;
+input double InpRecoveryFailureMaxSlopeMoneyPerMinute=0.0;
+input int    InpRecoveryFailureSampleSeconds=60;

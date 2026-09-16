@@ -298,7 +298,7 @@ void HybridTrajectoryClose(const int index,const ulong closeDealTicket,
    const bool passBase = (t.motifConfidence >= InpMotifDirectionConfidence &&
       t.motifGrossCostRatio >= InpMotifMinimumGrossToCostRatio);
    FileWrite(g_hybridTrajectoryHandle,
-      RBT_HYBRID_TRAJECTORY_SCHEMA,"5.10.15",_Symbol,t.positionId,
+      RBT_HYBRID_TRAJECTORY_SCHEMA,"5.10.17",_Symbol,t.positionId,
       (t.direction>0 ? "BUY" : "SELL"),
       TimeToString(t.openTime,TIME_DATE|TIME_SECONDS),
       TimeToString(closeTime,TIME_DATE|TIME_SECONDS),
@@ -336,7 +336,7 @@ void HybridTrajectoryClose(const int index,const ulong closeDealTicket,
       (int)(motifOppose && passBase && t.motifExpectedNetATR>=0.40),
       (int)(motifOppose && passBase && t.motifExpectedNetATR>=0.60),
       exitPolicy,
-      "NORMAL_HYBRID",
+      HybridCSVRuntimeMode(),
       "HYBRID_TEST");
    g_hybridTrajectoryRows++;
    FileFlush(g_hybridTrajectoryHandle);

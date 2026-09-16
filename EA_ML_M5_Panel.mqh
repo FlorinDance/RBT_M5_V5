@@ -687,16 +687,8 @@ void PanelCreate()
    PanelCreateCheckbox("CHK_TRADING", "Activate trading", g_runtimeAllowNewTrades,      x, y, 190); y += row + 2;
    PanelCreateCheckbox("CHK_MAX_LOSS", "Max Loss Protection", g_runtimeUseMaxLossMoney,    x, y, 190); y += row + 2;
    PanelCreateCheckbox("CHK_SPREAD",  "Spread filter",     g_runtimeUseMaxSpreadFilter,  x, y, 190); y += row + 2;
-   if(!InpHybridMotifEnable)
-   {
-      PanelCreateCheckbox("CHK_STRUCTURE_LINES", "Structure lines", g_runtimeShowStructureLines, x, y, 190);
-      y += row + 10;
-   }
-   else
-   {
-      PanelCreateLabel("LBL_HYBRID_ACTIVE", "Hybrid risk active", x, y, 190, 8, clrDarkGreen, true);
-      y += row + 10;
-   }
+   PanelCreateCheckbox("CHK_STRUCTURE_LINES", "Structure lines", g_runtimeShowStructureLines, x, y, 190);
+   y += row + 10;
    PanelCreateCheckbox("CHK_PROP_RISK", "Prop Risk", g_runtimePropRiskEnable, x, y, 190); y += row + 2;
    PanelCreateLabel("LBL_PROP_ACCOUNT", "Prop Account Value", x, y);
    PanelCreateEdit("EDIT_PROP_ACCOUNT", DoubleToString(g_runtimePropAccountValue, 2), x+150, y-2); y += row + 8;

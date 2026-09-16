@@ -1,0 +1,37 @@
+RBT M5 Hybrid v5.10.16
+
+Live Recovery failure protection
+
+- Default Recovery mode is RECOVERY_ONLY (1).
+- The new protection executes real order actions when enabled.
+- It starts collecting one floating-profit sample per minute after Recovery
+  triggers at -20.00 account-currency units for the 0.50 reference lot.
+- At 60 minutes after that trigger, it evaluates the position once, while the
+  original Recovery state is still waiting (the position has not reached the
+  +10.00 arm threshold).
+- It arms the secondary stop only when floating profit is at or below -40.00,
+  at least 90% of the samples from the last 30 minutes are negative, and the
+  least-squares profit slope over that window is negative.
+- The secondary stop is -160.00 for the 0.50 reference lot. All monetary
+  thresholds use the existing InpRecoveryScaleWithLot and
+  InpRecoveryReferenceLot scaling.
+- The stop price is solved with OrderCalcProfit and placed at the broker. If
+  price has already crossed the calculated stop, the EA requests an immediate
+  position close. Existing tighter stops are never weakened.
+- If the position reaches the existing +10.00 Recovery arm threshold before
+  the secondary stop is hit, the existing +5.00 protection supersedes it.
+- After an EA/terminal restart, the filter takes no action at the checkpoint
+  unless it has enough samples to cover the requested window.
+
+Research reference (minute CSV simulation, 2024-2026)
+
+- Large losses selected: 11 of 30.
+- Eventual winners selected: 0.
+- Estimated conservative result change: +394.50 EUR.
+- These values are research estimates. The final result must be measured by an
+  MT5 real-tick backtest because real stop execution can change later entries.
+
+Build note
+
+- RBT_M5_Hybrid_v5.10.16.mq5 is the source entry point.
+- No v5.10.16 EX5 is included; compile the MQ5 in MetaEditor.

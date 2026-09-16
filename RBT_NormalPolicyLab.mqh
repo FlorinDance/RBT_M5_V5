@@ -89,7 +89,7 @@ bool NormalPolicyInitialize()
 void NormalPolicyWrite(const SRBTNormalPolicyTrade &t,const SRBTNormalShadowArm &a)
 {
    if(g_normalPolicyHandle==INVALID_HANDLE) return;
-   FileWrite(g_normalPolicyHandle,RBT_NORMAL_POLICY_SCHEMA,"5.10.15",_Symbol,
+   FileWrite(g_normalPolicyHandle,RBT_NORMAL_POLICY_SCHEMA,"5.10.17",_Symbol,
       t.positionId,TimeToString(t.openTime,TIME_DATE|TIME_SECONDS),
       (t.direction>0?"BUY":"SELL"),DoubleToString(t.volume,2),
       DoubleToString(t.entryPrice,_Digits),DoubleToString(t.initialSL,_Digits),

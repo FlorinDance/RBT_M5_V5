@@ -11,6 +11,7 @@ int g_hybridCSVHandle = INVALID_HANDLE;
 string g_hybridCSVName = "";
 long g_hybridCSVRows = 0;
 long g_hybridCSVSignalNumber = 0;
+string g_hybridCSVSessionLabel = "";
 
 string HybridCSVSafeText(string value)
 {
@@ -32,13 +33,31 @@ string HybridCSVSafeLabel(string value)
    StringReplace(value, ">", "_");
    StringReplace(value, "|", "_");
    StringReplace(value, " ", "_");
+   StringReplace(value, ";", "_");
+   for(int i=0;i<StringLen(value);i++)
+      if(StringGetCharacter(value,i)<32)
+         StringSetCharacter(value,i,95);
+   if(StringLen(value)>80) value=StringSubstr(value,0,80);
+   if(StringLen(value)==0) value="RBT";
    return value;
+}
+
+string HybridCSVRuntimeMode()
+{
+   if((int)InpRecoveryMode==1) return "RECOVERY_ONLY";
+   if((int)InpRecoveryMode==2) return "RECOVERY_WITH_TRAIL";
+   return "NORMAL_HYBRID";
 }
 
 string HybridCSVRuntimeLabel()
 {
-   return HybridCSVSafeLabel(InpHybridRunLabel) +
-      "_NORMAL";
+   // One label for all six loggers. A new launch never appends to an old run
+   // or reuses a CSV held open by a chart, another tester, or a spreadsheet.
+   if(g_hybridCSVSessionLabel=="")
+      g_hybridCSVSessionLabel=StringFormat("%s_%s_RUN_%I64u_%I64u_%I64d",
+         HybridCSVSafeLabel(InpHybridRunLabel),HybridCSVRuntimeMode(),
+         GetTickCount64(),GetMicrosecondCount(),ChartID());
+   return g_hybridCSVSessionLabel;
 }
 
 bool HybridCSVInitialize()
@@ -115,7 +134,7 @@ long HybridCSVLogEntry(const int decision,
    if(dealTicket > 0 && HistoryDealSelect(dealTicket))
       positionId = (long)HistoryDealGetInteger(dealTicket, DEAL_POSITION_ID);
    FileWrite(g_hybridCSVHandle,
-      RBT_HYBRID_CSV_SCHEMA,"5.10.15","ENTRY",
+      RBT_HYBRID_CSV_SCHEMA,"5.10.17","ENTRY",
       TimeToString(now,TIME_DATE|TIME_SECONDS),(long)tick.time_msc,
       g_hybridCSVSignalNumber,_Symbol,"M5",M5_DecisionName(decision),
       DoubleToString(pSell,8),DoubleToString(pHold,8),DoubleToString(pBuy,8),
@@ -157,7 +176,7 @@ void HybridCSVOnTradeTransaction(const MqlTradeTransaction &trans)
    const double fee = HistoryDealGetDouble(trans.deal, DEAL_FEE);
    const double net = profit + commission + swap + fee;
    FileWrite(g_hybridCSVHandle,
-      RBT_HYBRID_CSV_SCHEMA,"5.10.15","CLOSE",
+      RBT_HYBRID_CSV_SCHEMA,"5.10.17","CLOSE",
       TimeToString(dealTime,TIME_DATE|TIME_SECONDS),dealTimeMsc,0,
       _Symbol,"M5","","","","","","","","","","","","","","","",
       "","","","","","","","","",0,0,0,trans.deal,positionId,

@@ -196,7 +196,7 @@ bool RiskManagerRegisterOpenedDeal(const ulong dealTicket,const double probabili
    r.baselineLot=HistoryDealGetDouble(dealTicket,DEAL_VOLUME); g_riskTrades[n]=r;
    if(g_riskShadowHandle!=INVALID_HANDLE)
    {
-      FileWrite(g_riskShadowHandle,RBT_RISK_SCHEMA,"5.10.15","ENTRY",_Symbol,pid,
+      FileWrite(g_riskShadowHandle,RBT_RISK_SCHEMA,"5.10.17","ENTRY",_Symbol,pid,
          TimeToString(r.openTime,TIME_DATE|TIME_SECONDS),(r.direction>0?"BUY":"SELL"),
          DoubleToString(r.riskProbability,8),DoubleToString(r.threshold,8),
          (r.recommendedMultiplier<1.0?"REDUCED":"FULL"),DoubleToString(r.baselineLot,4),
@@ -242,7 +242,7 @@ void RiskManagerOnTradeTransaction(const MqlTradeTransaction &trans)
    const datetime closeTime=(datetime)HistoryDealGetInteger(trans.deal,DEAL_TIME);
    if(g_riskShadowHandle!=INVALID_HANDLE)
    {
-      FileWrite(g_riskShadowHandle,RBT_RISK_SCHEMA,"5.10.15","CLOSE",_Symbol,pid,
+      FileWrite(g_riskShadowHandle,RBT_RISK_SCHEMA,"5.10.17","CLOSE",_Symbol,pid,
          TimeToString(closeTime,TIME_DATE|TIME_SECONDS),(r.direction>0?"BUY":"SELL"),
          DoubleToString(r.riskProbability,8),DoubleToString(r.threshold,8),
          (r.recommendedMultiplier<1.0?"REDUCED":"FULL"),DoubleToString(r.baselineLot,4),

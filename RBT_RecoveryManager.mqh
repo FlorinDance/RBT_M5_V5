@@ -1,102 +1,469 @@
 #ifndef RBT_RECOVERY_MANAGER
 #define RBT_RECOVERY_MANAGER
-// States: 0 untriggered, 1 waiting, 2 disabled-fast, 3 protected, 4 trailing.
-struct RecoveryState { ulong id; int stage; datetime trigger; double stop; };
+
+#define RBT_RECOVERY_FAILURE_MAX_SAMPLES 256
+
+// States: 0 untriggered, 1 waiting, 2 disabled-fast, 3 protected,
+// 4 trailing, 5 filtered failure stop armed.
+struct RecoveryState
+{
+   ulong    id;
+   int      stage;
+   datetime trigger;
+   double   stop;
+   bool     failureEvaluated;
+   datetime failureLastSample;
+   int      failureSampleCount;
+   datetime failureSampleTime[RBT_RECOVERY_FAILURE_MAX_SAMPLES];
+   double   failureSampleMoney[RBT_RECOVERY_FAILURE_MAX_SAMPLES];
+};
+
 RecoveryState recoveryStates[];
 int recoveryLog=INVALID_HANDLE;
+
 string RecoveryKey(const ulong id,const string field)
 {
- return StringFormat("R514.%I64d.%I64u.%s",AccountInfoInteger(ACCOUNT_LOGIN),id,field);
+   return StringFormat("R514.%I64d.%I64u.%s",AccountInfoInteger(ACCOUNT_LOGIN),id,field);
 }
+
 void RecoverySave(const int i)
 {
- if(MQLInfoInteger(MQL_TESTER)) return;
- GlobalVariableSet(RecoveryKey(recoveryStates[i].id,"state"),recoveryStates[i].stage);
- GlobalVariableSet(RecoveryKey(recoveryStates[i].id,"time"),(double)recoveryStates[i].trigger);
- GlobalVariableSet(RecoveryKey(recoveryStates[i].id,"stop"),recoveryStates[i].stop);
- GlobalVariablesFlush();
+   if(MQLInfoInteger(MQL_TESTER)) return;
+   GlobalVariableSet(RecoveryKey(recoveryStates[i].id,"state"),recoveryStates[i].stage);
+   GlobalVariableSet(RecoveryKey(recoveryStates[i].id,"time"),(double)recoveryStates[i].trigger);
+   GlobalVariableSet(RecoveryKey(recoveryStates[i].id,"stop"),recoveryStates[i].stop);
+   GlobalVariableSet(RecoveryKey(recoveryStates[i].id,"feval"),recoveryStates[i].failureEvaluated?1.0:0.0);
+   GlobalVariablesFlush();
 }
-void RecoveryLog(const ulong ticket,const int stage,const string event,const double money,const double sl)
+
+void RecoveryLog(const ulong ticket,const int stage,const string event,
+                 const double money,const double sl,
+                 const double negativeRatio=EMPTY_VALUE,
+                 const double slopeMoneyPerMinute=EMPTY_VALUE)
 {
- if(recoveryLog!=INVALID_HANDLE) {
-  FileWrite(recoveryLog,TimeToString(TimeCurrent(),TIME_DATE|TIME_SECONDS),ticket,(int)InpRecoveryMode,stage,event,money,sl);
-  FileFlush(recoveryLog);
- }
+   if(recoveryLog==INVALID_HANDLE) return;
+   const string ratioText=(negativeRatio==EMPTY_VALUE?"":DoubleToString(negativeRatio,6));
+   const string slopeText=(slopeMoneyPerMinute==EMPTY_VALUE?"":DoubleToString(slopeMoneyPerMinute,6));
+   FileWrite(recoveryLog,TimeToString(TimeCurrent(),TIME_DATE|TIME_SECONDS),ticket,
+             (int)InpRecoveryMode,stage,event,money,sl,ratioText,slopeText);
+   FileFlush(recoveryLog);
 }
+
+void RecoveryFailureReset(const int i)
+{
+   recoveryStates[i].failureEvaluated=false;
+   recoveryStates[i].failureLastSample=0;
+   recoveryStates[i].failureSampleCount=0;
+}
+
+void RecoveryFailureAddSample(const int i,const double money,
+                              const datetime now,const bool force=false)
+{
+   if(!InpRecoveryFailureProtection) return;
+   const datetime last=recoveryStates[i].failureLastSample;
+   if(last==now) return;
+   if(!force && last>0 && (now-last)<InpRecoveryFailureSampleSeconds) return;
+
+   int count=recoveryStates[i].failureSampleCount;
+   if(count>=RBT_RECOVERY_FAILURE_MAX_SAMPLES)
+   {
+      for(int s=1;s<RBT_RECOVERY_FAILURE_MAX_SAMPLES;s++)
+      {
+         recoveryStates[i].failureSampleTime[s-1]=recoveryStates[i].failureSampleTime[s];
+         recoveryStates[i].failureSampleMoney[s-1]=recoveryStates[i].failureSampleMoney[s];
+      }
+      count=RBT_RECOVERY_FAILURE_MAX_SAMPLES-1;
+   }
+
+   recoveryStates[i].failureSampleTime[count]=now;
+   recoveryStates[i].failureSampleMoney[count]=money;
+   recoveryStates[i].failureSampleCount=count+1;
+   recoveryStates[i].failureLastSample=now;
+}
+
+bool RecoveryFailureStats(const int i,const datetime now,
+                          double &negativeRatio,double &slopeMoneyPerMinute)
+{
+   negativeRatio=0.0;
+   slopeMoneyPerMinute=0.0;
+   const int windowSeconds=(int)MathRound(InpRecoveryFailureWindowMinutes*60.0);
+   const datetime fromTime=now-windowSeconds;
+   int first=-1;
+   int count=0;
+   int negative=0;
+
+   for(int s=0;s<recoveryStates[i].failureSampleCount;s++)
+   {
+      if(recoveryStates[i].failureSampleTime[s]<fromTime) continue;
+      if(first<0) first=s;
+      count++;
+      if(recoveryStates[i].failureSampleMoney[s]<0.0) negative++;
+   }
+
+   const int required=(int)MathCeil((double)windowSeconds/InpRecoveryFailureSampleSeconds);
+   if(first<0 || count<required || count<2) return false;
+   const int coverage=(int)(now-recoveryStates[i].failureSampleTime[first]);
+   if(coverage<windowSeconds-2*InpRecoveryFailureSampleSeconds) return false;
+
+   double sumX=0.0,sumY=0.0,sumXX=0.0,sumXY=0.0;
+   const datetime origin=recoveryStates[i].failureSampleTime[first];
+   for(int s=first;s<recoveryStates[i].failureSampleCount;s++)
+   {
+      if(recoveryStates[i].failureSampleTime[s]<fromTime) continue;
+      const double x=(double)(recoveryStates[i].failureSampleTime[s]-origin)/60.0;
+      const double y=recoveryStates[i].failureSampleMoney[s];
+      sumX+=x;
+      sumY+=y;
+      sumXX+=x*x;
+      sumXY+=x*y;
+   }
+
+   const double denominator=count*sumXX-sumX*sumX;
+   if(MathAbs(denominator)<1.0e-12) return false;
+   negativeRatio=(double)negative/count;
+   slopeMoneyPerMinute=(count*sumXY-sumX*sumY)/denominator;
+   return true;
+}
+
+bool RecoveryPriceForLoss(const bool buy,const double lots,const double entry,
+                          const double lossMoney,double &price)
+{
+   price=0.0;
+   if(lots<=0.0 || entry<=0.0 || lossMoney<=0.0) return false;
+   const ENUM_ORDER_TYPE type=buy?ORDER_TYPE_BUY:ORDER_TYPE_SELL;
+   const double direction=buy?-1.0:1.0;
+   double high=PipSize();
+   bool bracketed=false;
+
+   for(int n=0;n<48;n++)
+   {
+      const double probe=entry+direction*high;
+      if(probe<=0.0) return false;
+      double profit=0.0;
+      if(!OrderCalcProfit(type,_Symbol,lots,entry,probe,profit)) return false;
+      if(profit<=-lossMoney)
+      {
+         bracketed=true;
+         break;
+      }
+      high*=2.0;
+   }
+   if(!bracketed) return false;
+
+   double low=0.0;
+   for(int n=0;n<64;n++)
+   {
+      const double middle=(low+high)*0.5;
+      const double probe=entry+direction*middle;
+      double profit=0.0;
+      if(!OrderCalcProfit(type,_Symbol,lots,entry,probe,profit)) return false;
+      if(profit<=-lossMoney) high=middle;
+      else low=middle;
+   }
+
+   const double step=SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_SIZE);
+   if(step<=0.0) return false;
+   const double raw=entry+direction*high;
+   price=NormalizeDouble((buy?MathCeil(raw/step):MathFloor(raw/step))*step,_Digits);
+   return price>0.0;
+}
+
+bool RecoveryFailureEvaluate(const int i,const ulong ticket,const double money,
+                             const double recoveryScale,const bool buy)
+{
+   if(!InpRecoveryFailureProtection || recoveryStates[i].failureEvaluated) return false;
+   const datetime now=TimeCurrent();
+   const double minutes=(double)(now-recoveryStates[i].trigger)/60.0;
+   if(minutes<InpRecoveryFailureDelayMinutes) return false;
+
+   RecoveryFailureAddSample(i,money,now,true);
+   recoveryStates[i].failureEvaluated=true;
+
+   double negativeRatio=0.0,slope=0.0;
+   if(!RecoveryFailureStats(i,now,negativeRatio,slope))
+   {
+      RecoverySave(i);
+      RecoveryLog(ticket,1,"FAILURE_SKIPPED_NO_HISTORY",money,0.0);
+      return false;
+   }
+
+   const double activationLoss=InpRecoveryFailureActivationMoney*recoveryScale;
+   if(money>-activationLoss)
+   {
+      RecoverySave(i);
+      RecoveryLog(ticket,1,"FAILURE_REJECT_MONEY",money,0.0,negativeRatio,slope);
+      return false;
+   }
+   if(negativeRatio<InpRecoveryFailureNegativeRatio)
+   {
+      RecoverySave(i);
+      RecoveryLog(ticket,1,"FAILURE_REJECT_NEGATIVE_RATIO",money,0.0,negativeRatio,slope);
+      return false;
+   }
+   const double scaledMaxSlope=InpRecoveryFailureMaxSlopeMoneyPerMinute*recoveryScale;
+   if(slope>=scaledMaxSlope)
+   {
+      RecoverySave(i);
+      RecoveryLog(ticket,1,"FAILURE_REJECT_SLOPE",money,0.0,negativeRatio,slope);
+      return false;
+   }
+
+   const double stopLossMoney=InpRecoveryFailureStopMoney*recoveryScale;
+   double target=0.0;
+   RecoveryPriceForLoss(buy,PositionGetDouble(POSITION_VOLUME),
+                        PositionGetDouble(POSITION_PRICE_OPEN),stopLossMoney,target);
+   recoveryStates[i].stage=5;
+   recoveryStates[i].stop=target;
+   RecoverySave(i);
+   RecoveryLog(ticket,5,"FAILURE_ARMED",money,target,negativeRatio,slope);
+   return true;
+}
+
+bool RecoveryValidateInputs(string &reason)
+{
+   reason="";
+   if(InpRecoveryReferenceLot<=0) reason="InpRecoveryReferenceLot must be > 0";
+   else if(InpRecoveryLossMoney<=0) reason="InpRecoveryLossMoney must be > 0";
+   else if(InpRecoveryArmMoney<=InpRecoveryFloorMoney)
+      reason="InpRecoveryArmMoney must be > InpRecoveryFloorMoney";
+   else if(InpRecoveryFloorMoney<=0) reason="InpRecoveryFloorMoney must be > 0";
+   else if(InpRecoveryMinMinutes<0) reason="InpRecoveryMinMinutes must be >= 0";
+   else if(InpRecoveryTrailMinutes<=InpRecoveryMinMinutes)
+      reason="InpRecoveryTrailMinutes must be > InpRecoveryMinMinutes";
+   else if(InpRecoveryTrailPips<=0) reason="InpRecoveryTrailPips must be > 0";
+   if(reason!="") return false;
+
+   if(InpRecoveryFailureProtection)
+   {
+      const int windowSeconds=(int)MathRound(InpRecoveryFailureWindowMinutes*60.0);
+      const int required=(InpRecoveryFailureSampleSeconds>0 ?
+         (int)MathCeil((double)windowSeconds/InpRecoveryFailureSampleSeconds)+2 :
+         RBT_RECOVERY_FAILURE_MAX_SAMPLES+1);
+      if(InpRecoveryFailureDelayMinutes<=0.0)
+         reason="InpRecoveryFailureDelayMinutes must be > 0";
+      else if(InpRecoveryFailureWindowMinutes<=0.0)
+         reason="InpRecoveryFailureWindowMinutes must be > 0";
+      else if(InpRecoveryFailureWindowMinutes>InpRecoveryFailureDelayMinutes)
+         reason="InpRecoveryFailureWindowMinutes must be <= InpRecoveryFailureDelayMinutes";
+      else if(InpRecoveryFailureActivationMoney<=InpRecoveryLossMoney)
+         reason="InpRecoveryFailureActivationMoney must be > InpRecoveryLossMoney";
+      else if(InpRecoveryFailureStopMoney<=InpRecoveryFailureActivationMoney)
+         reason="InpRecoveryFailureStopMoney must be > InpRecoveryFailureActivationMoney";
+      else if(InpRecoveryFailureNegativeRatio<0.0 || InpRecoveryFailureNegativeRatio>1.0)
+         reason="InpRecoveryFailureNegativeRatio must be in [0,1]";
+      else if(InpRecoveryFailureSampleSeconds<1)
+         reason="InpRecoveryFailureSampleSeconds must be >= 1";
+      else if(required>RBT_RECOVERY_FAILURE_MAX_SAMPLES)
+         reason="Recovery window/sample interval exceeds the history buffer";
+   }
+   return reason=="";
+}
+
 bool RecoveryInit()
 {
- if(InpRecoveryReferenceLot<=0 || InpRecoveryLossMoney<=0 || InpRecoveryArmMoney<=InpRecoveryFloorMoney || InpRecoveryFloorMoney<=0 || InpRecoveryMinMinutes<0 || InpRecoveryTrailMinutes<=InpRecoveryMinMinutes || InpRecoveryTrailPips<=0) return false;
- ArrayResize(recoveryStates,0);
- if(InpRecoveryMode==RECOVERY_NORMAL) return true;
- FolderCreate("RBT_M5_V5",FILE_COMMON);
- string path="RBT_M5_V5\\RBT_M5_RECOVERY_"+InpHybridRunLabel+".csv";
- recoveryLog=FileOpen(path,FILE_READ|FILE_WRITE|FILE_CSV|FILE_ANSI|FILE_COMMON,';');
- if(recoveryLog==INVALID_HANDLE) return false;
- if(FileSize(recoveryLog)==0) FileWrite(recoveryLog,"time","ticket","mode","stage","event","floating_money","target_sl");
- FileSeek(recoveryLog,0,SEEK_END);
- return true;
+   string reason="";
+   if(!RecoveryValidateInputs(reason))
+   {
+      Print("RECOVERY invalid inputs | ",reason);
+      return false;
+   }
+   ArrayResize(recoveryStates,0);
+   if(InpRecoveryMode==RECOVERY_NORMAL) return true;
+   int flags=FILE_WRITE|FILE_CSV|FILE_ANSI|FILE_SHARE_READ;
+   if(InpHybridCSVUseCommonFiles)
+   {
+      flags|=FILE_COMMON;
+      FolderCreate("RBT_M5_V5",FILE_COMMON);
+   }
+   else FolderCreate("RBT_M5_V5");
+   const string path="RBT_M5_V5\\RBT_M5_RECOVERY_"+HybridCSVRuntimeLabel()+".csv";
+   ResetLastError();
+   recoveryLog=FileOpen(path,flags,';',CP_UTF8);
+   if(recoveryLog==INVALID_HANDLE)
+   {
+      const int error=GetLastError();
+      PrintFormat("RECOVERY CSV open failed | file=%s common=%d error=%d | label=%s",
+         path,(int)InpHybridCSVUseCommonFiles,error,InpHybridRunLabel);
+      return false;
+   }
+   ResetLastError();
+   const uint written=FileWrite(recoveryLog,"time","ticket","mode","stage","event","floating_money",
+                "target_sl","negative_ratio","slope_money_per_minute");
+   if(written==0)
+   {
+      const int error=GetLastError();
+      PrintFormat("RECOVERY CSV header write failed | file=%s error=%d",path,error);
+      FileClose(recoveryLog);
+      recoveryLog=INVALID_HANDLE;
+      return false;
+   }
+   FileFlush(recoveryLog);
+   PrintFormat("RECOVERY CSV ready | file=%s common=%d mode=%d failure_live=%d",
+      path,(int)InpHybridCSVUseCommonFiles,(int)InpRecoveryMode,(int)InpRecoveryFailureProtection);
+   return true;
 }
-void RecoveryShutdown() { if(recoveryLog!=INVALID_HANDLE) {FileClose(recoveryLog);recoveryLog=INVALID_HANDLE;} }
+
+void RecoveryShutdown()
+{
+   if(recoveryLog!=INVALID_HANDLE)
+   {
+      FileClose(recoveryLog);
+      recoveryLog=INVALID_HANDLE;
+   }
+}
+
 void RecoveryProcess()
 {
- if(InpRecoveryMode==RECOVERY_NORMAL) return;
- for(int p=PositionsTotal()-1;p>=0;p--) {
-  ulong ticket=PositionGetTicket(p);
-  if(ticket==0 || PositionGetString(POSITION_SYMBOL)!=_Symbol || PositionGetInteger(POSITION_MAGIC)!=InpMagicNumber) continue;
-  ulong id=(ulong)PositionGetInteger(POSITION_IDENTIFIER);
-  int i=0; for(;i<ArraySize(recoveryStates);i++) if(recoveryStates[i].id==id) break;
-  if(i==ArraySize(recoveryStates)) {
-   ArrayResize(recoveryStates,i+1);recoveryStates[i].id=id;recoveryStates[i].stage=0;recoveryStates[i].trigger=0;recoveryStates[i].stop=0;
-   if(!MQLInfoInteger(MQL_TESTER) && GlobalVariableCheck(RecoveryKey(id,"state"))) {
-    recoveryStates[i].stage=(int)GlobalVariableGet(RecoveryKey(id,"state"));
-    recoveryStates[i].trigger=(datetime)GlobalVariableGet(RecoveryKey(id,"time"));
-    recoveryStates[i].stop=GlobalVariableGet(RecoveryKey(id,"stop"));
+   if(InpRecoveryMode==RECOVERY_NORMAL) return;
+   for(int p=PositionsTotal()-1;p>=0;p--)
+   {
+      const ulong ticket=PositionGetTicket(p);
+      if(ticket==0 || PositionGetString(POSITION_SYMBOL)!=_Symbol ||
+         PositionGetInteger(POSITION_MAGIC)!=InpMagicNumber) continue;
+      const ulong id=(ulong)PositionGetInteger(POSITION_IDENTIFIER);
+      int i=0;
+      for(;i<ArraySize(recoveryStates);i++)
+         if(recoveryStates[i].id==id) break;
+
+      if(i==ArraySize(recoveryStates))
+      {
+         ArrayResize(recoveryStates,i+1);
+         recoveryStates[i].id=id;
+         recoveryStates[i].stage=0;
+         recoveryStates[i].trigger=0;
+         recoveryStates[i].stop=0.0;
+         RecoveryFailureReset(i);
+         if(!MQLInfoInteger(MQL_TESTER) && GlobalVariableCheck(RecoveryKey(id,"state")))
+         {
+            recoveryStates[i].stage=(int)GlobalVariableGet(RecoveryKey(id,"state"));
+            recoveryStates[i].trigger=(datetime)GlobalVariableGet(RecoveryKey(id,"time"));
+            recoveryStates[i].stop=GlobalVariableGet(RecoveryKey(id,"stop"));
+            if(GlobalVariableCheck(RecoveryKey(id,"feval")))
+               recoveryStates[i].failureEvaluated=(GlobalVariableGet(RecoveryKey(id,"feval"))>0.5);
+         }
+      }
+
+      const double money=PositionGetDouble(POSITION_PROFIT);
+      const double volume=PositionGetDouble(POSITION_VOLUME);
+      const double recoveryScale=InpRecoveryScaleWithLot?volume/InpRecoveryReferenceLot:1.0;
+      const double lossThreshold=InpRecoveryLossMoney*recoveryScale;
+      const double armThreshold=InpRecoveryArmMoney*recoveryScale;
+      const double floorThreshold=InpRecoveryFloorMoney*recoveryScale;
+      const bool buy=PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_BUY;
+      MqlTick tick;
+      if(!SymbolInfoTick(_Symbol,tick)) continue;
+      const double market=buy?tick.bid:tick.ask;
+      int before=recoveryStates[i].stage;
+
+      if(before==0 && money<=-lossThreshold)
+      {
+         recoveryStates[i].stage=1;
+         recoveryStates[i].trigger=TimeCurrent();
+         recoveryStates[i].stop=0.0;
+         RecoveryFailureReset(i);
+         RecoveryFailureAddSample(i,money,recoveryStates[i].trigger,true);
+         RecoverySave(i);
+         RecoveryLog(ticket,1,"TRIGGER",money,0.0);
+         continue;
+      }
+
+      if(before==1)
+      {
+         RecoveryFailureAddSample(i,money,TimeCurrent());
+         const double minutes=(double)(TimeCurrent()-recoveryStates[i].trigger)/60.0;
+         if(money>=armThreshold)
+            recoveryStates[i].stage=minutes<=InpRecoveryMinMinutes?2:3;
+         else
+         {
+            RecoveryFailureEvaluate(i,ticket,money,recoveryScale,buy);
+            if(recoveryStates[i].stage==1 && InpRecoveryMode==RECOVERY_WITH_TRAIL &&
+               minutes>=InpRecoveryTrailMinutes && money<0.0)
+               recoveryStates[i].stage=4;
+         }
+         if(recoveryStates[i].stage!=before && recoveryStates[i].stage!=5)
+         {
+            RecoverySave(i);
+            RecoveryLog(ticket,recoveryStates[i].stage,"STATE",money,0.0);
+         }
+      }
+      else if(before==5)
+      {
+         const double minutes=(double)(TimeCurrent()-recoveryStates[i].trigger)/60.0;
+         if(money>=armThreshold)
+            recoveryStates[i].stage=3;
+         else if(InpRecoveryMode==RECOVERY_WITH_TRAIL &&
+                 minutes>=InpRecoveryTrailMinutes && money<0.0)
+            recoveryStates[i].stage=4;
+         if(recoveryStates[i].stage!=before)
+         {
+            RecoverySave(i);
+            RecoveryLog(ticket,recoveryStates[i].stage,"STATE",money,recoveryStates[i].stop);
+         }
+      }
+
+      const int state=recoveryStates[i].stage;
+      if(state<3) continue;
+      const double oldSL=PositionGetDouble(POSITION_SL);
+      const double tp=PositionGetDouble(POSITION_TP);
+      const double step=SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_SIZE);
+      if(step<=0.0) continue;
+      double candidate=0.0;
+
+      if(state==3)
+      {
+         const double entry=PositionGetDouble(POSITION_PRICE_OPEN);
+         double unit=0.0;
+         if(!OrderCalcProfit(buy?ORDER_TYPE_BUY:ORDER_TYPE_SELL,_Symbol,volume,entry,
+                             entry+(buy?1.0:-1.0)*PipSize(),unit) || unit<=0.0) continue;
+         candidate=entry+(buy?1.0:-1.0)*floorThreshold/unit*PipSize();
+         candidate=NormalizeDouble((buy?MathFloor(candidate/step):MathCeil(candidate/step))*step,_Digits);
+      }
+      else if(state==4)
+      {
+         candidate=market+(buy?-1.0:1.0)*InpRecoveryTrailPips*PipSize();
+         candidate=NormalizeDouble((buy?MathFloor(candidate/step):MathCeil(candidate/step))*step,_Digits);
+      }
+      else
+      {
+         candidate=recoveryStates[i].stop;
+         if(candidate<=0.0)
+         {
+            const double stopLossMoney=InpRecoveryFailureStopMoney*recoveryScale;
+            if(!RecoveryPriceForLoss(buy,volume,PositionGetDouble(POSITION_PRICE_OPEN),
+                                     stopLossMoney,candidate)) continue;
+         }
+      }
+
+      const double saved=recoveryStates[i].stop;
+      if(saved==0.0 || (buy?candidate>saved:candidate<saved))
+      {
+         recoveryStates[i].stop=candidate;
+         RecoverySave(i);
+      }
+      double target=recoveryStates[i].stop;
+      if(oldSL>0.0) target=buy?MathMax(target,oldSL):MathMin(target,oldSL);
+
+      if(buy?market<=target:market>=target)
+      {
+         const bool ok=trade.PositionClose(ticket);
+         const uint code=trade.ResultRetcode();
+         const string prefix=(state==5?"FAILURE_":"");
+         RecoveryLog(ticket,state,prefix+((ok && (code==TRADE_RETCODE_DONE ||
+                     code==TRADE_RETCODE_DONE_PARTIAL))?"CLOSE_EXECUTED":"CLOSE_RETRY"),
+                     money,target);
+         continue;
+      }
+
+      const double distance=(double)MathMax(SymbolInfoInteger(_Symbol,SYMBOL_TRADE_STOPS_LEVEL),
+                                             SymbolInfoInteger(_Symbol,SYMBOL_TRADE_FREEZE_LEVEL))*_Point;
+      if(MathAbs(market-target)<=distance+step) continue;
+      if(oldSL>0.0 && (buy?target<=oldSL+step*0.5:target>=oldSL-step*0.5)) continue;
+      const bool ok=trade.PositionModify(ticket,target,tp);
+      const uint code=trade.ResultRetcode();
+      const string prefix=(state==5?"FAILURE_":"");
+      RecoveryLog(ticket,state,prefix+((ok && code==TRADE_RETCODE_DONE)?"SL_MODIFIED":"SL_RETRY"),
+                  money,target);
    }
-  }
-  double money=PositionGetDouble(POSITION_PROFIT); // Same measure as research dataset; excludes commission/swap.
-  const double recoveryScale=InpRecoveryScaleWithLot?PositionGetDouble(POSITION_VOLUME)/InpRecoveryReferenceLot:1.0;
-  const double lossThreshold=InpRecoveryLossMoney*recoveryScale;
-  const double armThreshold=InpRecoveryArmMoney*recoveryScale;
-  const double floorThreshold=InpRecoveryFloorMoney*recoveryScale;
-  bool buy=PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_BUY;
-  MqlTick tick;if(!SymbolInfoTick(_Symbol,tick)) continue;
-  double market=buy?tick.bid:tick.ask;
-  int before=recoveryStates[i].stage;
-  if(before==0 && money<=-lossThreshold) {
-   recoveryStates[i].stage=1;recoveryStates[i].trigger=TimeCurrent();RecoverySave(i);
-   RecoveryLog(ticket,1,"TRIGGER",money,0);continue;
-  }
-  if(before==1) {
-   double minutes=(double)(TimeCurrent()-recoveryStates[i].trigger)/60.0;
-   if(money>=armThreshold) recoveryStates[i].stage=minutes<=InpRecoveryMinMinutes?2:3;
-   else if(InpRecoveryMode==RECOVERY_WITH_TRAIL && minutes>=InpRecoveryTrailMinutes && money<0) recoveryStates[i].stage=4;
-   if(recoveryStates[i].stage!=before) {RecoverySave(i);RecoveryLog(ticket,recoveryStates[i].stage,"STATE",money,0);}
-  }
-  int state=recoveryStates[i].stage;if(state<3) continue;
-  double oldSL=PositionGetDouble(POSITION_SL),tp=PositionGetDouble(POSITION_TP);
-  double step=SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_SIZE);if(step<=0) continue;
-  double candidate=0;
-  if(state==3) {
-   double entry=PositionGetDouble(POSITION_PRICE_OPEN),unit=0;
-   if(!OrderCalcProfit(buy?ORDER_TYPE_BUY:ORDER_TYPE_SELL,_Symbol,PositionGetDouble(POSITION_VOLUME),entry,entry+(buy?1:-1)*PipSize(),unit) || unit<=0) continue;
-   candidate=entry+(buy?1:-1)*floorThreshold/unit*PipSize();
-  } else candidate=market+(buy?-1:1)*InpRecoveryTrailPips*PipSize();
-  candidate=NormalizeDouble((buy?MathFloor(candidate/step):MathCeil(candidate/step))*step,_Digits);
-  double saved=recoveryStates[i].stop;
-  if(saved==0 || (buy?candidate>saved:candidate<saved)) {recoveryStates[i].stop=candidate;RecoverySave(i);}
-  double target=recoveryStates[i].stop;
-  // Never weaken an existing broker stop.
-  if(oldSL>0) target=buy?MathMax(target,oldSL):MathMin(target,oldSL);
-  if(buy?market<=target:market>=target) {
-   bool ok=trade.PositionClose(ticket);uint code=trade.ResultRetcode();
-   RecoveryLog(ticket,state,(ok && (code==TRADE_RETCODE_DONE || code==TRADE_RETCODE_DONE_PARTIAL))?"CLOSE_EXECUTED":"CLOSE_RETRY",money,target);
-   continue;
-  }
-  double distance=(double)MathMax(SymbolInfoInteger(_Symbol,SYMBOL_TRADE_STOPS_LEVEL),SymbolInfoInteger(_Symbol,SYMBOL_TRADE_FREEZE_LEVEL))*_Point;
-  if(MathAbs(market-target)<=distance+step) continue; // Virtual protection remains active while broker placement is blocked.
-  if(oldSL>0 && (buy?target<=oldSL+step*0.5:target>=oldSL-step*0.5)) continue;
-  bool ok=trade.PositionModify(ticket,target,tp);uint code=trade.ResultRetcode();
-  RecoveryLog(ticket,state,(ok && code==TRADE_RETCODE_DONE)?"SL_MODIFIED":"SL_RETRY",money,target);
- }
 }
+
 #endif

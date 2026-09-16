@@ -226,7 +226,7 @@ void ManagerDatasetWriteRow(const long nowMsc,const ulong ticket,const long posi
    const double profitPips=(direction>0?(price-entry):(entry-price))/pip;
    const double xgbAge=(g_managerLastXGBTime>0?(double)(TimeCurrent()-g_managerLastXGBTime)/60.0:-1.0);
    const double motifAge=(g_hybridMotifLast.valid?(double)(TimeCurrent()-g_hybridMotifLast.anchorTime)/60.0:-1.0);
-   string line=RBT_MANAGER_DATASET_SCHEMA+";5.10.13;"+_Symbol+";"+(string)positionId+";";
+   string line=RBT_MANAGER_DATASET_SCHEMA+";5.10.17;"+_Symbol+";"+(string)positionId+";";
    line+=TimeToString((datetime)(nowMsc/1000),TIME_DATE|TIME_SECONDS)+";";
    line+=DoubleToString((double)(nowMsc-g_managerOpenTimeMsc)/60000.0,6)+";"+(direction>0?"BUY":"SELL")+";";
    line+=DoubleToString(PositionGetDouble(POSITION_VOLUME),4)+";"+DoubleToString(entry,_Digits)+";"+DoubleToString(price,_Digits)+";";

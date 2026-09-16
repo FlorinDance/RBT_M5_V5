@@ -1,14 +1,15 @@
 //+------------------------------------------------------------------+
-//| RBT_M5_Hybrid_v5.10.11.mq5                                      |
-//| Normal RBT + Motif risk and proportional shadow policy lab.      |
+//| RBT_M5_Hybrid_v5.10.17.mq5                                      |
+//| Normal RBT + live recovery and trailing management.            |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "5.111"
-#property description "RBT M5 v5.10.11 - trade manager ML dataset"
+#property version   "5.117"
+#property description "RBT M5 v5.10.17 - live recovery with filtered failure stop; optional entry risk diagnostics"
 
 #include <Trade/Trade.mqh>
 #include "XGB_M5_Wrapper.mqh"
 #resource "Files\\RBT_V58_Model.bin" as uchar g_RBTHybridMotifModelBytes[]
+#resource "Files\\RBT_RiskManager_V5113.bin" as uchar g_RBTRiskManagerModelBytes[]
 
 CTrade trade;
 
@@ -36,7 +37,10 @@ int hBands = INVALID_HANDLE;
 #include "RBT_Hybrid_TrajectoryLogger.mqh"
 #include "RBT_NormalPolicyLab.mqh"
 #include "RBT_ManagerDatasetLogger.mqh"
+#include "RBT_RiskManagerShadow.mqh"
 #include "EA_ML_M5_PositionManagement.mqh"
+#include "RBT_RecoveryManager.mqh"
+#include "Visual/RBT_Hybrid_StructureOverlay.mqh"
 
 bool HybridValidateStartupInputs(string &reason)
 {
@@ -53,6 +57,10 @@ bool HybridValidateStartupInputs(string &reason)
       reason = "First-profit epsilon cannot be negative";
    else if(InpManagerDatasetSampleSeconds < 1)
       reason = "Manager dataset sample seconds must be at least 1";
+   else if(InpRiskManagerThreshold < 0.0 || InpRiskManagerThreshold > 1.0)
+      reason = "Risk manager threshold must be in [0,1]";
+   else if(InpRiskManagerReducedLotMultiplier <= 0.0 || InpRiskManagerReducedLotMultiplier > 1.0)
+      reason = "Risk manager reduced multiplier must be in (0,1]";
    else if(!NormalPolicyValidateInputs(reason))
       return false;
    return (reason == "OK");
@@ -60,6 +68,13 @@ bool HybridValidateStartupInputs(string &reason)
 
 int OnInit()
 {
+   string recoveryReason="";
+   if(!RecoveryValidateInputs(recoveryReason))
+   {
+      Print("RECOVERY invalid inputs | ",recoveryReason);
+      return INIT_PARAMETERS_INCORRECT;
+   }
+   if(!RecoveryInit()) return INIT_FAILED; // RecoveryInit prints the file and exact MT5 error.
    string inputReason = "";
    if(!HybridValidateStartupInputs(inputReason))
    {
@@ -103,6 +118,7 @@ int OnInit()
    }
    g_runtimeLots = startupLots;
    PanelCreate();
+   HybridStructureOverlayInitialize();
 
    if(!RBTHybridMotifInitialize(g_RBTHybridMotifModelBytes))
       return INIT_PARAMETERS_INCORRECT;
@@ -114,8 +130,15 @@ int OnInit()
       return INIT_FAILED;
    if(!ManagerDatasetInitialize())
       return INIT_FAILED;
+   if(!RiskManagerInitialize(g_RBTRiskManagerModelBytes))
+      return INIT_FAILED;
 
-   PrintFormat("RBT M5 HYBRID v5.10.11 ready | mode=NORMAL_HYBRID | manager_dataset=%d/%ds | XGB BUY=%.3f SELL=%.3f GAP=%.3f | motif=%s | base lot=%.2f fixedSL=%.2f | policy_lab=%d prudent_A=%.1f/%.1f prudent_O=%.1f/%.1f permissive_A=%.1f/%.1f permissive_O=%.1f/%.1f",
+   PrintFormat("RBT M5 HYBRID v5.10.17 ready | recovery_mode=%d failure_live=%d delay=%.0fm activation=%.1f stop=%.1f window=%.0fm negative=%.2f slope_lt=%.3f | risk_shadow=%d threshold=%.3f reduced_mult=%.3f | manager_dataset=%d/%ds | XGB BUY=%.3f SELL=%.3f GAP=%.3f | motif=%s | base lot=%.2f fixedSL=%.2f | policy_lab=%d prudent_A=%.1f/%.1f prudent_O=%.1f/%.1f permissive_A=%.1f/%.1f permissive_O=%.1f/%.1f",
+      (int)InpRecoveryMode,(int)InpRecoveryFailureProtection,InpRecoveryFailureDelayMinutes,
+      InpRecoveryFailureActivationMoney,InpRecoveryFailureStopMoney,
+      InpRecoveryFailureWindowMinutes,InpRecoveryFailureNegativeRatio,
+      InpRecoveryFailureMaxSlopeMoneyPerMinute,
+      (int)InpRiskManagerShadowEnable,InpRiskManagerThreshold,InpRiskManagerReducedLotMultiplier,
       (int)InpManagerDatasetEnable,InpManagerDatasetSampleSeconds,
       InpMinBuyProb, InpMinSellProb, InpMinDecisionGap,
       (InpHybridMotifEnable ? "QUALITY_RISK_ACTIVE" : "OFF"),
@@ -129,6 +152,9 @@ int OnInit()
 
 void OnDeinit(const int reason)
 {
+   HybridStructureOverlayShutdown();
+   RecoveryShutdown();
+   RiskManagerShutdown();
    ManagerDatasetShutdown();
    NormalPolicyShutdown(reason);
    HybridTrajectoryShutdown(reason);
@@ -152,8 +178,11 @@ void OnChartEvent(const int id, const long &lparam,
                   const double &dparam, const string &sparam)
 {
    PanelHandleEvent(id, lparam, dparam, sparam);
-   // The legacy structure overlay is intentionally absent in the Hybrid build.
-   g_panelStructureLinesRefreshRequested = false;
+   if(g_panelStructureLinesRefreshRequested)
+   {
+      g_panelStructureLinesRefreshRequested=false;
+      V3O_Update();
+   }
 }
 
 void OnTradeTransaction(const MqlTradeTransaction &trans,
@@ -165,6 +194,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
    HybridCSVOnTradeTransaction(trans);
    HybridTrajectoryOnTradeTransaction(trans);
    NormalPolicyOnTradeTransaction(trans);
+   RiskManagerOnTradeTransaction(trans);
 }
 
 void OnTick()
@@ -185,6 +215,8 @@ void OnTick()
    if(g_runtimeUseMaxLossMoney)
       ManageOpenPositionsMaxLoss();
    ManageOpenPositionsFridayClose();
+   RecoveryProcess();
+   HybridStructureOverlayProcess();
    if(g_runtimeManageOpenPositions && g_runtimeUseProfitSteps &&
       InpProfitStepManageEveryTick)
       ManageOpenPositionsProfitSteps();
@@ -294,6 +326,17 @@ void OnTick()
       Dist_to_support_ATR, Dist_to_resistance_ATR, Ret_3, Ret_12,
       lotMultiplier, tpMultiplier, false, DYN_SL_NORMAL,
       "HYBRID_RUNTIME_CLASSIFICATION",false,0.0,0.0);
+   if(opened)
+   {
+      double riskProbability=0.0,riskRecommendedMultiplier=1.0;
+      const bool riskValid=RiskManagerPredict(decision,pSell,pHold,pBuy,gap,
+         riskProbability,riskRecommendedMultiplier);
+      if(!riskValid) riskRecommendedMultiplier=1.0;
+      RiskManagerRegisterOpenedDeal(trade.ResultDeal(),riskProbability,riskRecommendedMultiplier);
+      PrintFormat("RISK SHADOW ENTRY | valid=%d probability=%.6f threshold=%.6f class=%s baseline_mult=%.4f recommended_mult=%.4f real_actions=0",
+         (int)riskValid,riskProbability,InpRiskManagerThreshold,
+         (riskRecommendedMultiplier<1.0?"REDUCED":"FULL"),lotMultiplier,riskRecommendedMultiplier);
+   }
    HybridCSVLogEntry(decision,pSell,pHold,pBuy,chosen,gap,motifState,
       g_runtimeLots,lotMultiplier,effectiveLot,baseTPMoney,
       tpMultiplier,effectiveTPMoney,auditSLPips,allowTrade,hybridReason,

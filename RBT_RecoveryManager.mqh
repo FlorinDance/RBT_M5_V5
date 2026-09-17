@@ -3,8 +3,9 @@
 
 #define RBT_RECOVERY_FAILURE_MAX_SAMPLES 256
 
-// States: 0 untriggered, 1 waiting, 2 disabled-fast, 3 protected,
+// Recovery states: 0 untriggered, 1 waiting, 2 disabled-fast, 3 protected,
 // 4 trailing, 5 filtered failure stop armed.
+// Global modes use stages 10..13 and are isolated from the legacy recovery states.
 struct RecoveryState
 {
    ulong    id;
@@ -168,6 +169,218 @@ bool RecoveryPriceForLoss(const bool buy,const double lots,const double entry,
    return price>0.0;
 }
 
+// Convert a requested positive profit amount into a price suitable for a profit-side SL.
+bool RecoveryPriceForProfit(const bool buy,const double lots,const double entry,
+                            const double profitMoney,double &price)
+{
+   price=0.0;
+   if(lots<=0.0 || entry<=0.0 || profitMoney<=0.0) return false;
+
+   const ENUM_ORDER_TYPE type=buy?ORDER_TYPE_BUY:ORDER_TYPE_SELL;
+   const double direction=buy?1.0:-1.0;
+   double high=PipSize();
+   bool bracketed=false;
+
+   for(int n=0;n<48;n++)
+   {
+      const double probe=entry+direction*high;
+      if(probe<=0.0) return false;
+      double profit=0.0;
+      if(!OrderCalcProfit(type,_Symbol,lots,entry,probe,profit)) return false;
+      if(profit>=profitMoney)
+      {
+         bracketed=true;
+         break;
+      }
+      high*=2.0;
+   }
+   if(!bracketed) return false;
+
+   double low=0.0;
+   for(int n=0;n<64;n++)
+   {
+      const double middle=(low+high)*0.5;
+      const double probe=entry+direction*middle;
+      double profit=0.0;
+      if(!OrderCalcProfit(type,_Symbol,lots,entry,probe,profit)) return false;
+      if(profit>=profitMoney) high=middle;
+      else low=middle;
+   }
+
+   const double step=SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_SIZE);
+   if(step<=0.0) return false;
+
+   const double raw=entry+direction*high;
+   // Conservative rounding: do not overstate the requested protected profit.
+   price=NormalizeDouble((buy?MathFloor(raw/step):MathCeil(raw/step))*step,_Digits);
+   return price>0.0;
+}
+
+bool RecoveryGlobalResolveTarget(const double money,const double scale,
+                                 int &stage,double &lockMoney,string &eventName)
+{
+   stage=0;
+   lockMoney=0.0;
+   eventName="";
+
+   if(InpRecoveryMode==RECOVERY_GLOBAL_LOCK)
+   {
+      if(money<InpGlobalLockTriggerMoney*scale) return false;
+      stage=10;
+      lockMoney=InpGlobalLockFloorMoney*scale;
+      eventName="GLOBAL_LOCK_ARMED";
+      return true;
+   }
+
+   if(InpRecoveryMode!=RECOVERY_GLOBAL_STEP_TRAIL)
+      return false;
+
+   // Highest reached step wins and protection never moves backwards.
+   if(money>=InpGlobalStep3TriggerMoney*scale)
+   {
+      stage=13;
+      lockMoney=InpGlobalStep3FloorMoney*scale;
+      eventName="GLOBAL_STEP3_ARMED";
+      return true;
+   }
+   if(money>=InpGlobalStep2TriggerMoney*scale)
+   {
+      stage=12;
+      lockMoney=InpGlobalStep2FloorMoney*scale;
+      eventName="GLOBAL_STEP2_ARMED";
+      return true;
+   }
+   if(money>=InpGlobalStep1TriggerMoney*scale)
+   {
+      stage=11;
+      lockMoney=InpGlobalStep1FloorMoney*scale;
+      eventName="GLOBAL_STEP1_ARMED";
+      return true;
+   }
+
+   return false;
+}
+
+int RecoveryGlobalStateIndex(const ulong id)
+{
+   int i=0;
+   for(;i<ArraySize(recoveryStates);i++)
+      if(recoveryStates[i].id==id) break;
+
+   if(i==ArraySize(recoveryStates))
+   {
+      ArrayResize(recoveryStates,i+1);
+      recoveryStates[i].id=id;
+      recoveryStates[i].stage=0;
+      recoveryStates[i].trigger=0;
+      recoveryStates[i].stop=0.0;
+      RecoveryFailureReset(i);
+
+      if(!MQLInfoInteger(MQL_TESTER) && GlobalVariableCheck(RecoveryKey(id,"state")))
+      {
+         recoveryStates[i].stage=(int)GlobalVariableGet(RecoveryKey(id,"state"));
+         recoveryStates[i].trigger=(datetime)GlobalVariableGet(RecoveryKey(id,"time"));
+         recoveryStates[i].stop=GlobalVariableGet(RecoveryKey(id,"stop"));
+         if(GlobalVariableCheck(RecoveryKey(id,"feval")))
+            recoveryStates[i].failureEvaluated=(GlobalVariableGet(RecoveryKey(id,"feval"))>0.5);
+      }
+   }
+
+   // Safe switch from an old recovery mode while a position is already open.
+   if(recoveryStates[i].stage>0 && recoveryStates[i].stage<10)
+   {
+      recoveryStates[i].stage=0;
+      recoveryStates[i].trigger=0;
+      recoveryStates[i].stop=0.0;
+      RecoveryFailureReset(i);
+      RecoverySave(i);
+   }
+
+   return i;
+}
+
+void RecoveryProcessGlobalProfitMode()
+{
+   for(int p=PositionsTotal()-1;p>=0;p--)
+   {
+      const ulong ticket=PositionGetTicket(p);
+      if(ticket==0 || PositionGetString(POSITION_SYMBOL)!=_Symbol ||
+         PositionGetInteger(POSITION_MAGIC)!=InpMagicNumber) continue;
+
+      const ulong id=(ulong)PositionGetInteger(POSITION_IDENTIFIER);
+      const int i=RecoveryGlobalStateIndex(id);
+
+      const double money=PositionGetDouble(POSITION_PROFIT);
+      const double volume=PositionGetDouble(POSITION_VOLUME);
+      const double scale=InpRecoveryScaleWithLot?volume/InpRecoveryReferenceLot:1.0;
+      const bool buy=PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_BUY;
+      const double entry=PositionGetDouble(POSITION_PRICE_OPEN);
+      const double oldSL=PositionGetDouble(POSITION_SL);
+      const double tp=PositionGetDouble(POSITION_TP);
+
+      MqlTick tick;
+      if(!SymbolInfoTick(_Symbol,tick)) continue;
+      const double market=buy?tick.bid:tick.ask;
+
+      int desiredStage=0;
+      double lockMoney=0.0;
+      string eventName="";
+
+      if(RecoveryGlobalResolveTarget(money,scale,desiredStage,lockMoney,eventName) &&
+         desiredStage>recoveryStates[i].stage)
+      {
+         double candidate=0.0;
+         if(RecoveryPriceForProfit(buy,volume,entry,lockMoney,candidate))
+         {
+            recoveryStates[i].stage=desiredStage;
+            recoveryStates[i].stop=candidate;
+            RecoverySave(i);
+            RecoveryLog(ticket,desiredStage,eventName,money,candidate);
+         }
+      }
+
+      if(recoveryStates[i].stage<10 || recoveryStates[i].stop<=0.0)
+         continue;
+
+      const double step=SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_SIZE);
+      if(step<=0.0) continue;
+
+      double target=recoveryStates[i].stop;
+      // Preserve an already-better SL from any other active manager.
+      if(oldSL>0.0)
+         target=buy?MathMax(target,oldSL):MathMin(target,oldSL);
+
+      // If broker stop/freeze distance prevented SL placement and price already crossed
+      // the remembered floor, close immediately instead of losing the protection.
+      if(buy?market<=target:market>=target)
+      {
+         const bool ok=trade.PositionClose(ticket);
+         const uint code=trade.ResultRetcode();
+         RecoveryLog(ticket,recoveryStates[i].stage,
+                     (ok && (code==TRADE_RETCODE_DONE ||
+                             code==TRADE_RETCODE_DONE_PARTIAL))
+                        ?"GLOBAL_CLOSE_EXECUTED":"GLOBAL_CLOSE_RETRY",
+                     money,target);
+         continue;
+      }
+
+      const double distance=(double)MathMax(SymbolInfoInteger(_Symbol,SYMBOL_TRADE_STOPS_LEVEL),
+                                            SymbolInfoInteger(_Symbol,SYMBOL_TRADE_FREEZE_LEVEL))*_Point;
+      if(MathAbs(market-target)<=distance+step) continue;
+
+      if(oldSL>0.0 &&
+         (buy?target<=oldSL+step*0.5:target>=oldSL-step*0.5))
+         continue;
+
+      const bool ok=trade.PositionModify(ticket,target,tp);
+      const uint code=trade.ResultRetcode();
+      RecoveryLog(ticket,recoveryStates[i].stage,
+                  (ok && code==TRADE_RETCODE_DONE)
+                     ?"GLOBAL_SL_MODIFIED":"GLOBAL_SL_RETRY",
+                  money,target);
+   }
+}
+
 bool RecoveryFailureEvaluate(const int i,const ulong ticket,const double money,
                              const double recoveryScale,const bool buy)
 {
@@ -232,6 +445,34 @@ bool RecoveryValidateInputs(string &reason)
       reason="InpRecoveryTrailMinutes must be > InpRecoveryMinMinutes";
    else if(InpRecoveryTrailPips<=0) reason="InpRecoveryTrailPips must be > 0";
    if(reason!="") return false;
+
+   if(InpRecoveryMode==RECOVERY_GLOBAL_LOCK)
+   {
+      if(InpGlobalLockFloorMoney<=0.0)
+         reason="InpGlobalLockFloorMoney must be > 0";
+      else if(InpGlobalLockTriggerMoney<=InpGlobalLockFloorMoney)
+         reason="InpGlobalLockTriggerMoney must be > InpGlobalLockFloorMoney";
+      if(reason!="") return false;
+   }
+
+   if(InpRecoveryMode==RECOVERY_GLOBAL_STEP_TRAIL)
+   {
+      if(InpGlobalStep1FloorMoney<=0.0 ||
+         InpGlobalStep2FloorMoney<=0.0 ||
+         InpGlobalStep3FloorMoney<=0.0)
+         reason="Global step floors must be > 0";
+      else if(InpGlobalStep1TriggerMoney<=InpGlobalStep1FloorMoney ||
+              InpGlobalStep2TriggerMoney<=InpGlobalStep2FloorMoney ||
+              InpGlobalStep3TriggerMoney<=InpGlobalStep3FloorMoney)
+         reason="Each global step trigger must be > its floor";
+      else if(InpGlobalStep2TriggerMoney<=InpGlobalStep1TriggerMoney ||
+              InpGlobalStep3TriggerMoney<=InpGlobalStep2TriggerMoney)
+         reason="Global step triggers must increase";
+      else if(InpGlobalStep2FloorMoney<InpGlobalStep1FloorMoney ||
+              InpGlobalStep3FloorMoney<InpGlobalStep2FloorMoney)
+         reason="Global step floors must not decrease";
+      if(reason!="") return false;
+   }
 
    if(InpRecoveryFailureProtection)
    {
@@ -315,6 +556,16 @@ void RecoveryShutdown()
 void RecoveryProcess()
 {
    if(InpRecoveryMode==RECOVERY_NORMAL) return;
+
+   // Modes 3/4 are independent global profit-protection alternatives.
+   // They watch every EA trade from entry and do not require the -20 recovery trigger.
+   if(InpRecoveryMode==RECOVERY_GLOBAL_LOCK ||
+      InpRecoveryMode==RECOVERY_GLOBAL_STEP_TRAIL)
+   {
+      RecoveryProcessGlobalProfitMode();
+      return;
+   }
+
    for(int p=PositionsTotal()-1;p>=0;p--)
    {
       const ulong ticket=PositionGetTicket(p);
@@ -341,6 +592,17 @@ void RecoveryProcess()
             if(GlobalVariableCheck(RecoveryKey(id,"feval")))
                recoveryStates[i].failureEvaluated=(GlobalVariableGet(RecoveryKey(id,"feval"))>0.5);
          }
+      }
+
+      // If the EA was switched back from a global mode while a trade is open,
+      // do not reinterpret stages 10..13 as legacy Recovery stages.
+      if(recoveryStates[i].stage>=10)
+      {
+         recoveryStates[i].stage=0;
+         recoveryStates[i].trigger=0;
+         recoveryStates[i].stop=0.0;
+         RecoveryFailureReset(i);
+         RecoverySave(i);
       }
 
       const double money=PositionGetDouble(POSITION_PROFIT);

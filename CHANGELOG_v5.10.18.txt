@@ -1,0 +1,7 @@
+RBT_M5 v5.10.18
+- Added RECOVERY_GLOBAL_LOCK runtime mode: all trades, default +10 -> +5 SL.
+- Added RECOVERY_GLOBAL_STEP_TRAIL runtime mode: +10/+5, +15/+10, +20/+15.
+- Added configurable input thresholds for both modes.
+- Reused existing lot-scaling option and reference lot.
+- Existing RECOVERY_NORMAL / RECOVERY_ONLY / RECOVERY_WITH_TRAIL paths left unchanged.
+- Added persistence/safe mode-switch handling for new stages 10..13.

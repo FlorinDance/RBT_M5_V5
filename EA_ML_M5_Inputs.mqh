@@ -1445,8 +1445,17 @@ bool   InpDynSL_LogLateSessionWeakWideSLBuyReclassify = false;
 
 #endif // __EA_ML_M5_INPUTS_MQH__
 
-// V5.10.14: mutually exclusive live management modes. Monetary values use account currency.
-enum ENUM_RECOVERY_MODE { RECOVERY_NORMAL=0, RECOVERY_ONLY=1, RECOVERY_WITH_TRAIL=2 };
+// V5.10.18: mutually exclusive live management modes. Monetary values use account currency.
+// Modes 0/1/2 keep their validated behavior unchanged.
+// Modes 3/4 add global profit protection for all EA trades.
+enum ENUM_RECOVERY_MODE
+{
+   RECOVERY_NORMAL            = 0,
+   RECOVERY_ONLY              = 1,
+   RECOVERY_WITH_TRAIL        = 2,
+   RECOVERY_GLOBAL_LOCK       = 3,
+   RECOVERY_GLOBAL_STEP_TRAIL = 4
+};
 input group "Recovery management - LIVE orders"
 input ENUM_RECOVERY_MODE InpRecoveryMode=RECOVERY_ONLY;
 input bool InpRecoveryScaleWithLot=true;
@@ -1457,6 +1466,18 @@ input double InpRecoveryFloorMoney=5.0;
 input double InpRecoveryMinMinutes=30.0;
 input double InpRecoveryTrailMinutes=120.0;
 input double InpRecoveryTrailPips=5.0;
+
+input group "Global profit protection - LIVE orders"
+// Used only by RECOVERY_GLOBAL_LOCK / RECOVERY_GLOBAL_STEP_TRAIL.
+// Values scale with lot when InpRecoveryScaleWithLot=true.
+input double InpGlobalLockTriggerMoney=10.0;   // +10 -> protect +5 by default
+input double InpGlobalLockFloorMoney=5.0;
+input double InpGlobalStep1TriggerMoney=10.0;  // +10 -> +5
+input double InpGlobalStep1FloorMoney=5.0;
+input double InpGlobalStep2TriggerMoney=15.0;  // +15 -> +10
+input double InpGlobalStep2FloorMoney=10.0;
+input double InpGlobalStep3TriggerMoney=20.0;  // +20 -> +15
+input double InpGlobalStep3FloorMoney=15.0;
 
 input group "Recovery failure protection - LIVE orders"
 input bool   InpRecoveryFailureProtection=true;

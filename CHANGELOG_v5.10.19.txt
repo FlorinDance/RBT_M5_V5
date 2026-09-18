@@ -1,0 +1,11 @@
+RBT M5 v5.10.19
+
+Added runtime mode 5: RECOVERY_GLOBAL_LOCK_PLUS_RECOVERY_ONLY.
+
+This mode runs simultaneously:
+1) Global profit lock: default +10 EUR -> SL protecting +5 EUR on every trade.
+2) Existing RECOVERY_ONLY trigger/recovery logic: -20 EUR trigger and +10 EUR recovery handling.
+3) Existing Recovery failure protection: default evaluation after 60 minutes from the -20 Recovery trigger, using the configured activation/negative-ratio/slope filters and stop.
+
+Existing modes 0..4 are unchanged.
+All thresholds remain Inputs and lot scaling is unchanged.

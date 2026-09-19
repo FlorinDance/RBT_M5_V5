@@ -464,6 +464,33 @@ bool RecoveryProcessCombinedGlobalLock(const int i,const ulong ticket,
    return false;
 }
 
+// Mode 6 hard time-stop: close every still-open EA trade once its age reaches
+// InpCombinedTimeStopMinutes. Age is measured from POSITION_TIME (trade entry).
+bool RecoveryProcessCombinedTimeStop(const ulong ticket,const double money)
+{
+   if(InpRecoveryMode!=RECOVERY_GLOBAL_LOCK_RECOVERY_ONLY_TIME_STOP)
+      return false;
+
+   if(InpCombinedTimeStopMinutes<=0.0)
+      return false;
+
+   const datetime entryTime=(datetime)PositionGetInteger(POSITION_TIME);
+   if(entryTime<=0)
+      return false;
+
+   const double ageMinutes=(double)(TimeCurrent()-entryTime)/60.0;
+   if(ageMinutes<InpCombinedTimeStopMinutes)
+      return false;
+
+   const bool ok=trade.PositionClose(ticket);
+   const uint code=trade.ResultRetcode();
+   RecoveryLog(ticket,21,
+               (ok && (code==TRADE_RETCODE_DONE || code==TRADE_RETCODE_DONE_PARTIAL))
+                  ?"COMBINED_TIME_STOP_CLOSE_EXECUTED":"COMBINED_TIME_STOP_CLOSE_RETRY",
+               money,0.0);
+   return true;
+}
+
 bool RecoveryFailureEvaluate(const int i,const ulong ticket,const double money,
                              const double recoveryScale,const bool buy)
 {
@@ -530,7 +557,8 @@ bool RecoveryValidateInputs(string &reason)
    if(reason!="") return false;
 
    if(InpRecoveryMode==RECOVERY_GLOBAL_LOCK ||
-      InpRecoveryMode==RECOVERY_GLOBAL_LOCK_PLUS_RECOVERY_ONLY)
+      InpRecoveryMode==RECOVERY_GLOBAL_LOCK_PLUS_RECOVERY_ONLY ||
+      InpRecoveryMode==RECOVERY_GLOBAL_LOCK_RECOVERY_ONLY_TIME_STOP)
    {
       if(InpGlobalLockFloorMoney<=0.0)
          reason="InpGlobalLockFloorMoney must be > 0";
@@ -556,6 +584,13 @@ bool RecoveryValidateInputs(string &reason)
               InpGlobalStep3FloorMoney<InpGlobalStep2FloorMoney)
          reason="Global step floors must not decrease";
       if(reason!="") return false;
+   }
+
+   if(InpRecoveryMode==RECOVERY_GLOBAL_LOCK_RECOVERY_ONLY_TIME_STOP &&
+      InpCombinedTimeStopMinutes<=0.0)
+   {
+      reason="InpCombinedTimeStopMinutes must be > 0";
+      return false;
    }
 
    if(InpRecoveryFailureProtection)
@@ -706,11 +741,19 @@ void RecoveryProcess()
       if(!SymbolInfoTick(_Symbol,tick)) continue;
       const double market=buy?tick.bid:tick.ask;
 
-      // Mode 5 = global +10/+5 overlay + the complete RECOVERY_ONLY logic below.
-      // The overlay has its own state and does not replace the -20 trigger,
-      // +10 recovery handling or the 60-minute failure protection.
-      if(InpRecoveryMode==RECOVERY_GLOBAL_LOCK_PLUS_RECOVERY_ONLY)
+      // Modes 5/6 = global +10/+5 overlay + the complete RECOVERY_ONLY logic below.
+      // Mode 6 additionally hard-closes any position still open after the configured
+      // age from trade entry (default 245 minutes = 4h05).
+      if(InpRecoveryMode==RECOVERY_GLOBAL_LOCK_PLUS_RECOVERY_ONLY ||
+         InpRecoveryMode==RECOVERY_GLOBAL_LOCK_RECOVERY_ONLY_TIME_STOP)
       {
+         // In mode 6 the time-stop is authoritative: once 4h05 is reached, close now
+         // instead of arming/modifying another SL on the same tick.
+         if(RecoveryProcessCombinedTimeStop(ticket,money))
+            continue;
+         if(!PositionSelectByTicket(ticket))
+            continue;
+
          if(RecoveryProcessCombinedGlobalLock(i,ticket,money,recoveryScale,buy,volume,market))
             continue;
          if(!PositionSelectByTicket(ticket))

@@ -1445,9 +1445,11 @@ bool   InpDynSL_LogLateSessionWeakWideSLBuyReclassify = false;
 
 #endif // __EA_ML_M5_INPUTS_MQH__
 
-// V5.10.18: mutually exclusive live management modes. Monetary values use account currency.
+// V5.10.20: mutually exclusive live management modes. Monetary values use account currency.
 // Modes 0/1/2 keep their validated behavior unchanged.
-// Modes 3/4 add global profit protection alternatives; mode 5 overlays global +10/+5 on RECOVERY_ONLY.
+// Modes 3/4 are global profit protection alternatives.
+// Mode 5 overlays global +10/+5 on RECOVERY_ONLY.
+// Mode 6 keeps mode 5 intact and adds a configurable hard time-stop from trade entry.
 enum ENUM_RECOVERY_MODE
 {
    RECOVERY_NORMAL            = 0,
@@ -1455,7 +1457,8 @@ enum ENUM_RECOVERY_MODE
    RECOVERY_WITH_TRAIL        = 2,
    RECOVERY_GLOBAL_LOCK       = 3,
    RECOVERY_GLOBAL_STEP_TRAIL = 4,
-   RECOVERY_GLOBAL_LOCK_PLUS_RECOVERY_ONLY = 5
+   RECOVERY_GLOBAL_LOCK_PLUS_RECOVERY_ONLY = 5,
+   RECOVERY_GLOBAL_LOCK_RECOVERY_ONLY_TIME_STOP = 6
 };
 input group "Recovery management - LIVE orders"
 input ENUM_RECOVERY_MODE InpRecoveryMode=RECOVERY_ONLY;
@@ -1479,6 +1482,11 @@ input double InpGlobalStep2TriggerMoney=15.0;  // +15 -> +10
 input double InpGlobalStep2FloorMoney=10.0;
 input double InpGlobalStep3TriggerMoney=20.0;  // +20 -> +15
 input double InpGlobalStep3FloorMoney=15.0;
+
+input group "Combined mode time stop - LIVE orders"
+// Used only by RECOVERY_GLOBAL_LOCK_RECOVERY_ONLY_TIME_STOP (mode 6).
+// Time is measured from the original trade entry, not from the -20 Recovery trigger.
+input double InpCombinedTimeStopMinutes=245.0; // 245 min = 4h05
 
 input group "Recovery failure protection - LIVE orders"
 input bool   InpRecoveryFailureProtection=true;

@@ -2,6 +2,7 @@
 #define RBT_RECOVERY_MANAGER
 
 #define RBT_RECOVERY_FAILURE_MAX_SAMPLES 256
+#define RBT_RECOVERY_DEGRADATION_MAX_SAMPLES 16
 
 // Recovery states: 0 untriggered, 1 waiting, 2 disabled-fast, 3 protected,
 // 4 trailing, 5 filtered failure stop armed.
@@ -19,6 +20,25 @@ struct RecoveryState
    int      failureSampleCount;
    datetime failureSampleTime[RBT_RECOVERY_FAILURE_MAX_SAMPLES];
    double   failureSampleMoney[RBT_RECOVERY_FAILURE_MAX_SAMPLES];
+
+   // v5.10.21 live degradation detector state (mode 7).
+   bool     degradationSegmentActive;
+   datetime degradationSegmentStart;
+   bool     degradationSegmentRearmed;
+   bool     degradationRecoverySeen;
+   bool     degradationAboveLossSeen;
+   bool     degradationAWarningLogged;
+   bool     degradationB1Attempted;
+   datetime degradationB1CandidateTime;
+   datetime degradationB2CandidateTime;
+   datetime degradationLastSample;
+   int      degradationSampleCount;
+   datetime degradationSampleTime[RBT_RECOVERY_DEGRADATION_MAX_SAMPLES];
+   double   degradationSamplePrice[RBT_RECOVERY_DEGRADATION_MAX_SAMPLES];
+   bool     degradationD2Armed;
+   datetime degradationD2Start;
+   double   degradationD2BaselineMoney;
+   int      degradationCloseStage;
 };
 
 RecoveryState recoveryStates[];
@@ -38,6 +58,10 @@ void RecoverySave(const int i)
    GlobalVariableSet(RecoveryKey(recoveryStates[i].id,"garm"),recoveryStates[i].globalLockArmed?1.0:0.0);
    GlobalVariableSet(RecoveryKey(recoveryStates[i].id,"gstop"),recoveryStates[i].globalLockStop);
    GlobalVariableSet(RecoveryKey(recoveryStates[i].id,"feval"),recoveryStates[i].failureEvaluated?1.0:0.0);
+   GlobalVariableSet(RecoveryKey(recoveryStates[i].id,"d2arm"),recoveryStates[i].degradationD2Armed?1.0:0.0);
+   GlobalVariableSet(RecoveryKey(recoveryStates[i].id,"d2time"),(double)recoveryStates[i].degradationD2Start);
+   GlobalVariableSet(RecoveryKey(recoveryStates[i].id,"d2base"),recoveryStates[i].degradationD2BaselineMoney);
+   GlobalVariableSet(RecoveryKey(recoveryStates[i].id,"dgclose"),(double)recoveryStates[i].degradationCloseStage);
    GlobalVariablesFlush();
 }
 
@@ -59,6 +83,44 @@ void RecoveryFailureReset(const int i)
    recoveryStates[i].failureEvaluated=false;
    recoveryStates[i].failureLastSample=0;
    recoveryStates[i].failureSampleCount=0;
+}
+
+void RecoveryDegradationReset(const int i)
+{
+   recoveryStates[i].degradationSegmentActive=false;
+   recoveryStates[i].degradationSegmentStart=0;
+   recoveryStates[i].degradationSegmentRearmed=false;
+   recoveryStates[i].degradationRecoverySeen=false;
+   recoveryStates[i].degradationAboveLossSeen=false;
+   recoveryStates[i].degradationAWarningLogged=false;
+   recoveryStates[i].degradationB1Attempted=false;
+   recoveryStates[i].degradationB1CandidateTime=0;
+   recoveryStates[i].degradationB2CandidateTime=0;
+   recoveryStates[i].degradationLastSample=0;
+   recoveryStates[i].degradationSampleCount=0;
+   recoveryStates[i].degradationD2Armed=false;
+   recoveryStates[i].degradationD2Start=0;
+   recoveryStates[i].degradationD2BaselineMoney=0.0;
+   recoveryStates[i].degradationCloseStage=0;
+}
+
+bool RecoveryDegradationEnabled()
+{
+   return InpRecoveryMode==RECOVERY_GLOBAL_LOCK_RECOVERY_DEGRADATION_TIME_STOP &&
+          InpDegradationProtection;
+}
+
+void RecoveryDegradationLoadPersistent(const int i,const ulong id)
+{
+   if(MQLInfoInteger(MQL_TESTER)) return;
+   if(GlobalVariableCheck(RecoveryKey(id,"d2arm")))
+      recoveryStates[i].degradationD2Armed=(GlobalVariableGet(RecoveryKey(id,"d2arm"))>0.5);
+   if(GlobalVariableCheck(RecoveryKey(id,"d2time")))
+      recoveryStates[i].degradationD2Start=(datetime)GlobalVariableGet(RecoveryKey(id,"d2time"));
+   if(GlobalVariableCheck(RecoveryKey(id,"d2base")))
+      recoveryStates[i].degradationD2BaselineMoney=GlobalVariableGet(RecoveryKey(id,"d2base"));
+   if(GlobalVariableCheck(RecoveryKey(id,"dgclose")))
+      recoveryStates[i].degradationCloseStage=(int)GlobalVariableGet(RecoveryKey(id,"dgclose"));
 }
 
 void RecoveryFailureAddSample(const int i,const double money,
@@ -282,6 +344,7 @@ int RecoveryGlobalStateIndex(const ulong id)
       recoveryStates[i].globalLockArmed=false;
       recoveryStates[i].globalLockStop=0.0;
       RecoveryFailureReset(i);
+      RecoveryDegradationReset(i);
 
       if(!MQLInfoInteger(MQL_TESTER) && GlobalVariableCheck(RecoveryKey(id,"state")))
       {
@@ -294,6 +357,7 @@ int RecoveryGlobalStateIndex(const ulong id)
             recoveryStates[i].globalLockStop=GlobalVariableGet(RecoveryKey(id,"gstop"));
          if(GlobalVariableCheck(RecoveryKey(id,"feval")))
             recoveryStates[i].failureEvaluated=(GlobalVariableGet(RecoveryKey(id,"feval"))>0.5);
+         RecoveryDegradationLoadPersistent(i,id);
       }
    }
 
@@ -306,6 +370,7 @@ int RecoveryGlobalStateIndex(const ulong id)
       recoveryStates[i].globalLockArmed=false;
       recoveryStates[i].globalLockStop=0.0;
       RecoveryFailureReset(i);
+      RecoveryDegradationReset(i);
       RecoverySave(i);
    }
 
@@ -464,11 +529,12 @@ bool RecoveryProcessCombinedGlobalLock(const int i,const ulong ticket,
    return false;
 }
 
-// Mode 6 hard time-stop: close every still-open EA trade once its age reaches
+// Modes 6/7 hard time-stop: close every still-open EA trade once its age reaches
 // InpCombinedTimeStopMinutes. Age is measured from POSITION_TIME (trade entry).
 bool RecoveryProcessCombinedTimeStop(const ulong ticket,const double money)
 {
-   if(InpRecoveryMode!=RECOVERY_GLOBAL_LOCK_RECOVERY_ONLY_TIME_STOP)
+   if(InpRecoveryMode!=RECOVERY_GLOBAL_LOCK_RECOVERY_ONLY_TIME_STOP &&
+      InpRecoveryMode!=RECOVERY_GLOBAL_LOCK_RECOVERY_DEGRADATION_TIME_STOP)
       return false;
 
    if(InpCombinedTimeStopMinutes<=0.0)
@@ -489,6 +555,263 @@ bool RecoveryProcessCombinedTimeStop(const ulong ticket,const double money)
                   ?"COMBINED_TIME_STOP_CLOSE_EXECUTED":"COMBINED_TIME_STOP_CLOSE_RETRY",
                money,0.0);
    return true;
+}
+
+string RecoveryDegradationName(const int stage)
+{
+   if(stage==31) return "B1_FAST_SHOCK";
+   if(stage==32) return "B2_SUSTAINED_COLLAPSE";
+   if(stage==34) return "D2_CONFIRMED_DETERIORATION";
+   return "DEGRADATION";
+}
+
+void RecoveryDegradationAddSample(const int i,const datetime now,
+                                  const double market,const bool force=false)
+{
+   if(!RecoveryDegradationEnabled()) return;
+   const datetime last=recoveryStates[i].degradationLastSample;
+   if(last==now) return;
+   if(!force && last>0 && (now-last)<InpDegradationSampleSeconds) return;
+
+   int count=recoveryStates[i].degradationSampleCount;
+   if(count>=RBT_RECOVERY_DEGRADATION_MAX_SAMPLES)
+   {
+      for(int s=1;s<RBT_RECOVERY_DEGRADATION_MAX_SAMPLES;s++)
+      {
+         recoveryStates[i].degradationSampleTime[s-1]=recoveryStates[i].degradationSampleTime[s];
+         recoveryStates[i].degradationSamplePrice[s-1]=recoveryStates[i].degradationSamplePrice[s];
+      }
+      count=RBT_RECOVERY_DEGRADATION_MAX_SAMPLES-1;
+   }
+
+   recoveryStates[i].degradationSampleTime[count]=now;
+   recoveryStates[i].degradationSamplePrice[count]=market;
+   recoveryStates[i].degradationSampleCount=count+1;
+   recoveryStates[i].degradationLastSample=now;
+}
+
+void RecoveryDegradationStartSegment(const int i,const datetime startTime,
+                                     const bool rearmed,const double market)
+{
+   recoveryStates[i].degradationSegmentActive=true;
+   recoveryStates[i].degradationSegmentStart=startTime;
+   recoveryStates[i].degradationSegmentRearmed=rearmed;
+   recoveryStates[i].degradationRecoverySeen=false;
+   recoveryStates[i].degradationAboveLossSeen=false;
+   recoveryStates[i].degradationAWarningLogged=false;
+   recoveryStates[i].degradationB1Attempted=false;
+   recoveryStates[i].degradationB1CandidateTime=0;
+   recoveryStates[i].degradationB2CandidateTime=0;
+   recoveryStates[i].degradationLastSample=0;
+   recoveryStates[i].degradationSampleCount=0;
+   RecoveryDegradationAddSample(i,TimeCurrent(),market,true);
+}
+
+bool RecoveryDegradationAttemptClose(const int i,const ulong ticket,
+                                     const double money,const int requestedStage)
+{
+   if(recoveryStates[i].degradationCloseStage==0)
+   {
+      recoveryStates[i].degradationCloseStage=requestedStage;
+      RecoverySave(i);
+   }
+
+   const int stage=recoveryStates[i].degradationCloseStage;
+   const string name=RecoveryDegradationName(stage);
+   const bool ok=trade.PositionClose(ticket);
+   const uint code=trade.ResultRetcode();
+   RecoveryLog(ticket,stage,
+      name+((ok && (code==TRADE_RETCODE_DONE || code==TRADE_RETCODE_DONE_PARTIAL))
+              ?"_CLOSE_EXECUTED":"_CLOSE_RETRY"),money,0.0);
+   return true;
+}
+
+bool RecoveryDegradationCheckA(const int i,const ulong ticket,const double money,
+                               const double scale,const bool buy)
+{
+   if(recoveryStates[i].degradationAWarningLogged) return false;
+   if(money>-InpDegradationALossMoney*scale) return false;
+   if(recoveryStates[i].degradationAboveLossSeen) return false;
+
+   const int moves=InpDegradationAConsecutiveM5Moves;
+   if(moves<1) return false;
+   MqlRates rates[];
+   ArraySetAsSeries(rates,true);
+   if(CopyRates(_Symbol,PERIOD_M5,1,moves+1,rates)!=(moves+1)) return false;
+   if(rates[moves].time<recoveryStates[i].degradationSegmentStart) return false;
+
+   for(int k=moves;k>0;k--)
+   {
+      const double older=rates[k].close;
+      const double newer=rates[k-1].close;
+      const bool adverse=buy?(newer<older):(newer>older);
+      if(!adverse) return false;
+   }
+
+   const double pips=MathAbs(rates[0].close-rates[moves].close)/PipSize();
+   if(pips<InpDegradationAAdversePips) return false;
+
+   recoveryStates[i].degradationAWarningLogged=true;
+   RecoveryLog(ticket,30,"DEGRADATION_A_WARNING",money,0.0,EMPTY_VALUE,pips);
+   return true;
+}
+
+bool RecoveryDegradationB2Pattern(const int i,const bool buy,double &adversePips)
+{
+   adversePips=0.0;
+   const int moves=InpDegradationB2ConsecutiveMoves;
+   if(moves<1) return false;
+   const int count=recoveryStates[i].degradationSampleCount;
+   if(count<moves+1) return false;
+
+   const int first=count-moves-1;
+   for(int s=first+1;s<count;s++)
+   {
+      const datetime dt=recoveryStates[i].degradationSampleTime[s]-
+                        recoveryStates[i].degradationSampleTime[s-1];
+      if(dt<=0 || dt>InpDegradationSampleSeconds*2+10) return false;
+      const double older=recoveryStates[i].degradationSamplePrice[s-1];
+      const double newer=recoveryStates[i].degradationSamplePrice[s];
+      const bool adverse=buy?(newer<older):(newer>older);
+      if(!adverse) return false;
+   }
+
+   adversePips=MathAbs(recoveryStates[i].degradationSamplePrice[count-1]-
+                       recoveryStates[i].degradationSamplePrice[first])/PipSize();
+   return true;
+}
+
+bool RecoveryProcessDegradation(const int i,const ulong ticket,const double money,
+                                const double scale,const bool buy,
+                                const double market,const double lossThreshold,
+                                const double armThreshold)
+{
+   if(!RecoveryDegradationEnabled()) return false;
+   const datetime now=TimeCurrent();
+
+   // A previously confirmed live close is authoritative and is retried until executed.
+   if(recoveryStates[i].degradationCloseStage!=0)
+      return RecoveryDegradationAttemptClose(i,ticket,money,recoveryStates[i].degradationCloseStage);
+
+   // D2: the 1h failure filter already classified the trade as degraded. If it
+   // loses another configured amount during the next window, close immediately.
+   if(recoveryStates[i].degradationD2Armed)
+   {
+      const double age=(double)(now-recoveryStates[i].degradationD2Start)/60.0;
+      if(age>InpDegradationD2WindowMinutes)
+      {
+         recoveryStates[i].degradationD2Armed=false;
+         RecoverySave(i);
+         RecoveryLog(ticket,34,"DEGRADATION_D2_EXPIRED",money,0.0);
+      }
+      else if(money<=recoveryStates[i].degradationD2BaselineMoney-
+                     InpDegradationD2AdditionalLossMoney*scale)
+      {
+         return RecoveryDegradationAttemptClose(i,ticket,money,34);
+      }
+   }
+
+   // Once +10 is reached the global +10/+5 protection owns the position.
+   if(money>=armThreshold)
+   {
+      RecoveryDegradationReset(i);
+      RecoverySave(i);
+      return false;
+   }
+
+   // Recover state after an EA/terminal restart while an already-triggered
+   // Recovery trade is still open. Sample history starts fresh, conservatively.
+   if(!recoveryStates[i].degradationSegmentActive &&
+      recoveryStates[i].trigger>0 &&
+      (recoveryStates[i].stage==1 || recoveryStates[i].stage==5))
+   {
+      RecoveryDegradationStartSegment(i,recoveryStates[i].trigger,false,market);
+   }
+   if(!recoveryStates[i].degradationSegmentActive) return false;
+
+   // Track recovery above the -20 boundary. A recovery to at least -15 marks C.
+   if(money>-lossThreshold)
+      recoveryStates[i].degradationAboveLossSeen=true;
+   if(money>=-InpDegradationCRecoveryMoney*scale && money<armThreshold)
+      recoveryStates[i].degradationRecoverySeen=true;
+
+   // C - failed recovery: when price falls through -20 again, start a fresh
+   // degradation segment. The re-armed B2 requires a stricter pip impulse.
+   if(recoveryStates[i].degradationRecoverySeen && money<=-lossThreshold)
+   {
+      RecoveryDegradationStartSegment(i,now,true,market);
+      RecoveryLog(ticket,33,"DEGRADATION_C_REARM",money,0.0);
+   }
+
+   RecoveryDegradationAddSample(i,now,market);
+   RecoveryDegradationCheckA(i,ticket,money,scale,buy);
+
+   const double segmentAge=(double)(now-recoveryStates[i].degradationSegmentStart)/60.0;
+
+   // B1 candidate and confirmation.
+   if(recoveryStates[i].degradationB1CandidateTime>0)
+   {
+      const int elapsed=(int)(now-recoveryStates[i].degradationB1CandidateTime);
+      if(elapsed>InpDegradationB1ConfirmMaxSeconds)
+      {
+         recoveryStates[i].degradationB1CandidateTime=0;
+      }
+      else if(elapsed>=InpDegradationB1ConfirmMinSeconds &&
+              money<=-InpDegradationB1ConfirmLossMoney*scale)
+      {
+         return RecoveryDegradationAttemptClose(i,ticket,money,31);
+      }
+   }
+   if(!recoveryStates[i].degradationB1Attempted &&
+      recoveryStates[i].degradationB1CandidateTime==0 &&
+      segmentAge<=InpDegradationB1FirstWindowMinutes &&
+      money<=-InpDegradationB1FirstLossMoney*scale)
+   {
+      recoveryStates[i].degradationB1Attempted=true;
+      recoveryStates[i].degradationB1CandidateTime=now;
+      RecoveryLog(ticket,31,"DEGRADATION_B1_ARMED",money,0.0);
+   }
+
+   // B2 candidate and confirmation. The candidate is based on sampled market
+   // price every ~60 seconds, not candle color, so BUY/SELL are symmetric.
+   if(recoveryStates[i].degradationB2CandidateTime>0)
+   {
+      const int elapsed=(int)(now-recoveryStates[i].degradationB2CandidateTime);
+      if(money>-lossThreshold)
+      {
+         recoveryStates[i].degradationB2CandidateTime=0;
+      }
+      else if(elapsed>InpDegradationB2ConfirmMaxSeconds)
+      {
+         recoveryStates[i].degradationB2CandidateTime=0;
+      }
+      else if(elapsed>=InpDegradationB2ConfirmMinSeconds &&
+              money<=-InpDegradationB2ConfirmLossMoney*scale)
+      {
+         return RecoveryDegradationAttemptClose(i,ticket,money,32);
+      }
+   }
+
+   if(recoveryStates[i].degradationB2CandidateTime==0 &&
+      segmentAge<=InpDegradationB2WindowMinutes &&
+      !recoveryStates[i].degradationAboveLossSeen &&
+      money<=-InpDegradationB2ArmLossMoney*scale)
+   {
+      double adversePips=0.0;
+      if(RecoveryDegradationB2Pattern(i,buy,adversePips))
+      {
+         const double requiredPips=(recoveryStates[i].degradationSegmentRearmed
+            ?InpDegradationB2RearmedAdversePips
+            :InpDegradationB2InitialAdversePips);
+         if(adversePips>=requiredPips)
+         {
+            recoveryStates[i].degradationB2CandidateTime=now;
+            RecoveryLog(ticket,32,"DEGRADATION_B2_ARMED",money,0.0,EMPTY_VALUE,adversePips);
+         }
+      }
+   }
+
+   return false;
 }
 
 bool RecoveryFailureEvaluate(const int i,const ulong ticket,const double money,
@@ -537,8 +860,16 @@ bool RecoveryFailureEvaluate(const int i,const ulong ticket,const double money,
                         PositionGetDouble(POSITION_PRICE_OPEN),stopLossMoney,target);
    recoveryStates[i].stage=5;
    recoveryStates[i].stop=target;
+   if(RecoveryDegradationEnabled())
+   {
+      recoveryStates[i].degradationD2Armed=true;
+      recoveryStates[i].degradationD2Start=now;
+      recoveryStates[i].degradationD2BaselineMoney=money;
+   }
    RecoverySave(i);
    RecoveryLog(ticket,5,"FAILURE_ARMED",money,target,negativeRatio,slope);
+   if(RecoveryDegradationEnabled())
+      RecoveryLog(ticket,34,"DEGRADATION_D2_ARMED",money,0.0,negativeRatio,slope);
    return true;
 }
 
@@ -558,7 +889,8 @@ bool RecoveryValidateInputs(string &reason)
 
    if(InpRecoveryMode==RECOVERY_GLOBAL_LOCK ||
       InpRecoveryMode==RECOVERY_GLOBAL_LOCK_PLUS_RECOVERY_ONLY ||
-      InpRecoveryMode==RECOVERY_GLOBAL_LOCK_RECOVERY_ONLY_TIME_STOP)
+      InpRecoveryMode==RECOVERY_GLOBAL_LOCK_RECOVERY_ONLY_TIME_STOP ||
+      InpRecoveryMode==RECOVERY_GLOBAL_LOCK_RECOVERY_DEGRADATION_TIME_STOP)
    {
       if(InpGlobalLockFloorMoney<=0.0)
          reason="InpGlobalLockFloorMoney must be > 0";
@@ -586,7 +918,8 @@ bool RecoveryValidateInputs(string &reason)
       if(reason!="") return false;
    }
 
-   if(InpRecoveryMode==RECOVERY_GLOBAL_LOCK_RECOVERY_ONLY_TIME_STOP &&
+   if((InpRecoveryMode==RECOVERY_GLOBAL_LOCK_RECOVERY_ONLY_TIME_STOP ||
+       InpRecoveryMode==RECOVERY_GLOBAL_LOCK_RECOVERY_DEGRADATION_TIME_STOP) &&
       InpCombinedTimeStopMinutes<=0.0)
    {
       reason="InpCombinedTimeStopMinutes must be > 0";
@@ -615,6 +948,41 @@ bool RecoveryValidateInputs(string &reason)
          reason="InpRecoveryFailureSampleSeconds must be >= 1";
       else if(required>RBT_RECOVERY_FAILURE_MAX_SAMPLES)
          reason="Recovery window/sample interval exceeds the history buffer";
+   }
+
+   if(reason=="" && InpRecoveryMode==RECOVERY_GLOBAL_LOCK_RECOVERY_DEGRADATION_TIME_STOP &&
+      InpDegradationProtection)
+   {
+      if(InpDegradationSampleSeconds<1)
+         reason="InpDegradationSampleSeconds must be >= 1";
+      else if(InpDegradationAConsecutiveM5Moves<1 || InpDegradationAConsecutiveM5Moves>8)
+         reason="InpDegradationAConsecutiveM5Moves must be in [1,8]";
+      else if(InpDegradationAAdversePips<=0.0 || InpDegradationALossMoney<=InpRecoveryLossMoney)
+         reason="A degradation thresholds are invalid";
+      else if(InpDegradationB1FirstWindowMinutes<=0.0 ||
+              InpDegradationB1FirstLossMoney<=InpRecoveryLossMoney ||
+              InpDegradationB1ConfirmLossMoney<=InpDegradationB1FirstLossMoney)
+         reason="B1 degradation thresholds are invalid";
+      else if(InpDegradationB1ConfirmMinSeconds<1 ||
+              InpDegradationB1ConfirmMaxSeconds<InpDegradationB1ConfirmMinSeconds)
+         reason="B1 confirmation timing is invalid";
+      else if(InpDegradationB2WindowMinutes<=0.0 ||
+              InpDegradationB2ConsecutiveMoves<2 ||
+              InpDegradationB2ConsecutiveMoves>=RBT_RECOVERY_DEGRADATION_MAX_SAMPLES ||
+              InpDegradationB2InitialAdversePips<=0.0 ||
+              InpDegradationB2RearmedAdversePips<InpDegradationB2InitialAdversePips ||
+              InpDegradationB2ArmLossMoney<=InpRecoveryLossMoney ||
+              InpDegradationB2ConfirmLossMoney<=InpDegradationB2ArmLossMoney)
+         reason="B2 degradation thresholds are invalid";
+      else if(InpDegradationB2ConfirmMinSeconds<1 ||
+              InpDegradationB2ConfirmMaxSeconds<InpDegradationB2ConfirmMinSeconds)
+         reason="B2 confirmation timing is invalid";
+      else if(InpDegradationCRecoveryMoney<=0.0 ||
+              InpDegradationCRecoveryMoney>=InpRecoveryLossMoney)
+         reason="InpDegradationCRecoveryMoney must be in (0, RecoveryLossMoney)";
+      else if(InpDegradationD2AdditionalLossMoney<=0.0 ||
+              InpDegradationD2WindowMinutes<=0.0)
+         reason="D2 degradation thresholds are invalid";
    }
    return reason=="";
 }
@@ -705,6 +1073,7 @@ void RecoveryProcess()
          recoveryStates[i].globalLockArmed=false;
          recoveryStates[i].globalLockStop=0.0;
          RecoveryFailureReset(i);
+         RecoveryDegradationReset(i);
          if(!MQLInfoInteger(MQL_TESTER) && GlobalVariableCheck(RecoveryKey(id,"state")))
          {
             recoveryStates[i].stage=(int)GlobalVariableGet(RecoveryKey(id,"state"));
@@ -716,6 +1085,7 @@ void RecoveryProcess()
                recoveryStates[i].globalLockStop=GlobalVariableGet(RecoveryKey(id,"gstop"));
             if(GlobalVariableCheck(RecoveryKey(id,"feval")))
                recoveryStates[i].failureEvaluated=(GlobalVariableGet(RecoveryKey(id,"feval"))>0.5);
+            RecoveryDegradationLoadPersistent(i,id);
          }
       }
 
@@ -727,6 +1097,7 @@ void RecoveryProcess()
          recoveryStates[i].trigger=0;
          recoveryStates[i].stop=0.0;
          RecoveryFailureReset(i);
+         RecoveryDegradationReset(i);
          RecoverySave(i);
       }
 
@@ -741,20 +1112,26 @@ void RecoveryProcess()
       if(!SymbolInfoTick(_Symbol,tick)) continue;
       const double market=buy?tick.bid:tick.ask;
 
-      // Modes 5/6 = global +10/+5 overlay + the complete RECOVERY_ONLY logic below.
-      // Mode 6 additionally hard-closes any position still open after the configured
-      // age from trade entry (default 245 minutes = 4h05).
+      // Modes 5/6/7 = global +10/+5 overlay + the complete RECOVERY_ONLY logic below.
+      // Modes 6/7 also apply the configurable hard time-stop from trade entry.
+      // Mode 7 additionally executes the LIVE B1/B2/D2 degradation exits.
       if(InpRecoveryMode==RECOVERY_GLOBAL_LOCK_PLUS_RECOVERY_ONLY ||
-         InpRecoveryMode==RECOVERY_GLOBAL_LOCK_RECOVERY_ONLY_TIME_STOP)
+         InpRecoveryMode==RECOVERY_GLOBAL_LOCK_RECOVERY_ONLY_TIME_STOP ||
+         InpRecoveryMode==RECOVERY_GLOBAL_LOCK_RECOVERY_DEGRADATION_TIME_STOP)
       {
-         // In mode 6 the time-stop is authoritative: once 4h05 is reached, close now
-         // instead of arming/modifying another SL on the same tick.
+         // Time-stop is authoritative in modes 6/7.
          if(RecoveryProcessCombinedTimeStop(ticket,money))
             continue;
          if(!PositionSelectByTicket(ticket))
             continue;
 
          if(RecoveryProcessCombinedGlobalLock(i,ticket,money,recoveryScale,buy,volume,market))
+            continue;
+         if(!PositionSelectByTicket(ticket))
+            continue;
+
+         if(RecoveryProcessDegradation(i,ticket,money,recoveryScale,buy,market,
+                                       lossThreshold,armThreshold))
             continue;
          if(!PositionSelectByTicket(ticket))
             continue;
@@ -768,7 +1145,10 @@ void RecoveryProcess()
          recoveryStates[i].trigger=TimeCurrent();
          recoveryStates[i].stop=0.0;
          RecoveryFailureReset(i);
+         RecoveryDegradationReset(i);
          RecoveryFailureAddSample(i,money,recoveryStates[i].trigger,true);
+         if(RecoveryDegradationEnabled())
+            RecoveryDegradationStartSegment(i,recoveryStates[i].trigger,false,market);
          RecoverySave(i);
          RecoveryLog(ticket,1,"TRIGGER",money,0.0);
          continue;

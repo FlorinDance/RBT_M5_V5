@@ -1,0 +1,13 @@
+v5.10.21
+- Added mode 7: global +10/+5 + Recovery Only + LIVE degradation B1/B2/D2 + hard time-stop.
+- Changed default recovery mode to mode 7 for this build.
+- Changed default hard time-stop from 245 min (4h05) to 605 min (10h05).
+- Changed default failure activation from 40 to 35 account-currency units at 0.50 reference lot.
+- Added A continuous-collapse M5 warning.
+- Added B1 fast-shock real market close with 60..120 s confirmation.
+- Added B2 sustained 60-second adverse-sequence real market close with confirmation.
+- Added C failed-recovery re-arm of B1/B2.
+- Added D2 real market close after an additional 30 loss within 20 min of failure arm.
+- Added persistent D2/latched-close state for live restarts.
+- Expanded runtime CSV mode names for modes 3..7.
+- Fixed chart-structure GUI checkbox so HH/HL/LH/LL, paths and BOS/CHOCH are all hidden when unchecked.

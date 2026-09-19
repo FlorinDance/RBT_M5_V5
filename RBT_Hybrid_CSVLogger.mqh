@@ -46,6 +46,11 @@ string HybridCSVRuntimeMode()
 {
    if((int)InpRecoveryMode==1) return "RECOVERY_ONLY";
    if((int)InpRecoveryMode==2) return "RECOVERY_WITH_TRAIL";
+   if((int)InpRecoveryMode==3) return "GLOBAL_LOCK";
+   if((int)InpRecoveryMode==4) return "GLOBAL_STEP_TRAIL";
+   if((int)InpRecoveryMode==5) return "GLOBAL_LOCK_RECOVERY";
+   if((int)InpRecoveryMode==6) return "GLOBAL_LOCK_RECOVERY_TIME_STOP";
+   if((int)InpRecoveryMode==7) return "GLOBAL_LOCK_RECOVERY_DEGRADATION";
    return "NORMAL_HYBRID";
 }
 

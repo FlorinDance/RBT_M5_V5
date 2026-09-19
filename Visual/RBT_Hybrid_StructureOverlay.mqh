@@ -199,7 +199,21 @@ void V3O_DrawBreakLabel(const string tag,
 
 void V3O_Update()
 {
-   if(!HybridStructureOverlayCanDraw() || !g_hybridOverlayM5.valid)
+   if(!HybridStructureOverlayCanDraw())
+      return;
+
+   // The GUI checkbox owns the complete structure overlay: swing labels,
+   // connecting paths and BOS/CHOCH labels. Hidden means nothing remains.
+   if(!g_runtimeShowStructureLines)
+   {
+      V3O_DeleteObjects();
+      ChartRedraw(0);
+      return;
+   }
+
+   // If the user enables the overlay before the first regular refresh, build
+   // the current snapshot immediately so HH/HL/LH/LL and paths appear together.
+   if(!g_hybridOverlayM5.valid && !HybridStructureOverlayRefresh())
       return;
 
    V3O_DeleteObjects();
@@ -207,12 +221,10 @@ void V3O_Update()
    int segmentsDrawn = 0;
 
    // Draw paths first so labels remain readable above them.
-   if(g_runtimeShowStructureLines &&
-      InpV3OverlayShowInternalSwings &&
+   if(InpV3OverlayShowInternalSwings &&
       InpV3OverlayConnectInternalSwings)
       V3O_DrawSwingPath(g_hybridOverlayM5.internalSwings, "INT", false, segmentsDrawn);
-   if(g_runtimeShowStructureLines &&
-      InpV3OverlayShowExternalSwings &&
+   if(InpV3OverlayShowExternalSwings &&
       InpV3OverlayConnectExternalSwings)
       V3O_DrawSwingPath(g_hybridOverlayM5.externalSwings, "EXT", true, segmentsDrawn);
 
@@ -256,7 +268,8 @@ void HybridStructureOverlayInitialize()
    RBT_SwingSeriesReset(g_hybridOverlayM5.internalSwings);
    RBT_SwingSeriesReset(g_hybridOverlayM5.externalSwings);
    RBT_StructureSnapshotReset(g_hybridOverlayM5.structure);
-   if(HybridStructureOverlayCanDraw()) V3O_DeleteObjects();
+   // Always remove stale objects from an older EA instance/version.
+   V3O_DeleteObjects();
 }
 
 void HybridStructureOverlayProcess()
@@ -274,7 +287,7 @@ void HybridStructureOverlayProcess()
 
 void HybridStructureOverlayShutdown()
 {
-   if(HybridStructureOverlayCanDraw()) V3O_DeleteObjects();
+   V3O_DeleteObjects();
    RBT_MarketDataReset(g_hybridOverlayM5.market);
 }
 #endif

@@ -687,7 +687,7 @@ void PanelCreate()
    PanelCreateCheckbox("CHK_TRADING", "Activate trading", g_runtimeAllowNewTrades,      x, y, 190); y += row + 2;
    PanelCreateCheckbox("CHK_MAX_LOSS", "Max Loss Protection", g_runtimeUseMaxLossMoney,    x, y, 190); y += row + 2;
    PanelCreateCheckbox("CHK_SPREAD",  "Spread filter",     g_runtimeUseMaxSpreadFilter,  x, y, 190); y += row + 2;
-   PanelCreateCheckbox("CHK_STRUCTURE_LINES", "Structure lines", g_runtimeShowStructureLines, x, y, 190);
+   PanelCreateCheckbox("CHK_STRUCTURE_LINES", "Chart structure", g_runtimeShowStructureLines, x, y, 190);
    y += row + 10;
    PanelCreateCheckbox("CHK_PROP_RISK", "Prop Risk", g_runtimePropRiskEnable, x, y, 190); y += row + 2;
    PanelCreateLabel("LBL_PROP_ACCOUNT", "Prop Account Value", x, y);
@@ -719,8 +719,8 @@ void PanelCreate()
                 
    PanelSetTooltip("CHK_SPREAD_BOX",    "Enable or disable the maximum spread filter for new trades.");
    PanelSetTooltip("CHK_SPREAD_LABEL",  "Enable or disable the maximum spread filter for new trades.");
-   PanelSetTooltip("CHK_STRUCTURE_LINES_BOX",   "Show or hide both internal and external structure swing paths. Default: hidden.");
-   PanelSetTooltip("CHK_STRUCTURE_LINES_LABEL", "Show or hide both internal and external structure swing paths. This is visual only and does not affect trading.");
+   PanelSetTooltip("CHK_STRUCTURE_LINES_BOX",   "Show or hide the complete chart structure overlay: HH/HL/LH/LL labels, swing paths and BOS/CHOCH. Default: hidden.");
+   PanelSetTooltip("CHK_STRUCTURE_LINES_LABEL", "Show or hide the complete chart structure overlay: HH/HL/LH/LL labels, swing paths and BOS/CHOCH. This is visual only and does not affect trading.");
    PanelSetTooltip("CHK_PROP_RISK_BOX",  "Enable or disable the optional account-level Prop Risk guard. It can block new entries and emergency-close this EA's positions at the configured limits.");
    PanelSetTooltip("CHK_PROP_RISK_LABEL", "Limits are calculated from the Prop Account Value, firm percentages and safety buffers. This does not change the ML signal, lot or TP.");
    PanelSetTooltip("LBL_PROP_ACCOUNT", "Starting value of the prop/evaluation account. Default: 10000.");

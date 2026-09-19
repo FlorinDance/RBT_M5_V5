@@ -1445,11 +1445,12 @@ bool   InpDynSL_LogLateSessionWeakWideSLBuyReclassify = false;
 
 #endif // __EA_ML_M5_INPUTS_MQH__
 
-// V5.10.20: mutually exclusive live management modes. Monetary values use account currency.
+// V5.10.21: mutually exclusive live management modes. Monetary values use account currency.
 // Modes 0/1/2 keep their validated behavior unchanged.
 // Modes 3/4 are global profit protection alternatives.
 // Mode 5 overlays global +10/+5 on RECOVERY_ONLY.
 // Mode 6 keeps mode 5 intact and adds a configurable hard time-stop from trade entry.
+// Mode 7 adds LIVE degradation protection (B1/B2/D2) plus the configurable hard time-stop.
 enum ENUM_RECOVERY_MODE
 {
    RECOVERY_NORMAL            = 0,
@@ -1458,10 +1459,11 @@ enum ENUM_RECOVERY_MODE
    RECOVERY_GLOBAL_LOCK       = 3,
    RECOVERY_GLOBAL_STEP_TRAIL = 4,
    RECOVERY_GLOBAL_LOCK_PLUS_RECOVERY_ONLY = 5,
-   RECOVERY_GLOBAL_LOCK_RECOVERY_ONLY_TIME_STOP = 6
+   RECOVERY_GLOBAL_LOCK_RECOVERY_ONLY_TIME_STOP = 6,
+   RECOVERY_GLOBAL_LOCK_RECOVERY_DEGRADATION_TIME_STOP = 7
 };
 input group "Recovery management - LIVE orders"
-input ENUM_RECOVERY_MODE InpRecoveryMode=RECOVERY_ONLY;
+input ENUM_RECOVERY_MODE InpRecoveryMode=RECOVERY_GLOBAL_LOCK_RECOVERY_DEGRADATION_TIME_STOP;
 input bool InpRecoveryScaleWithLot=true;
 input double InpRecoveryReferenceLot=0.50;
 input double InpRecoveryLossMoney=20.0;
@@ -1484,16 +1486,50 @@ input double InpGlobalStep3TriggerMoney=20.0;  // +20 -> +15
 input double InpGlobalStep3FloorMoney=15.0;
 
 input group "Combined mode time stop - LIVE orders"
-// Used only by RECOVERY_GLOBAL_LOCK_RECOVERY_ONLY_TIME_STOP (mode 6).
-// Time is measured from the original trade entry, not from the -20 Recovery trigger.
-input double InpCombinedTimeStopMinutes=245.0; // 245 min = 4h05
+// Used by mode 6 and mode 7. Time is measured from the original trade entry,
+// not from the -20 Recovery trigger.
+input double InpCombinedTimeStopMinutes=605.0; // 605 min = 10h05
 
 input group "Recovery failure protection - LIVE orders"
 input bool   InpRecoveryFailureProtection=true;
 input double InpRecoveryFailureDelayMinutes=60.0;
-input double InpRecoveryFailureActivationMoney=40.0;
+input double InpRecoveryFailureActivationMoney=35.0;
 input double InpRecoveryFailureStopMoney=160.0;
 input double InpRecoveryFailureWindowMinutes=30.0;
 input double InpRecoveryFailureNegativeRatio=0.90;
 input double InpRecoveryFailureMaxSlopeMoneyPerMinute=0.0;
 input int    InpRecoveryFailureSampleSeconds=60;
+
+input group "Degradation protection - LIVE orders"
+// Used only by mode 7. B1/B2/D2 close real positions; A/C are warning/re-arm states.
+input bool   InpDegradationProtection=true;
+input int    InpDegradationSampleSeconds=60;
+
+// A - Continuous collapse M5 (warning only, never closes by itself).
+input int    InpDegradationAConsecutiveM5Moves=2;
+input double InpDegradationAAdversePips=10.0;
+input double InpDegradationALossMoney=90.0;
+
+// B1 - Fast shock: early deep loss, then still deeply negative after ~1 minute.
+input double InpDegradationB1FirstWindowMinutes=3.0;
+input double InpDegradationB1FirstLossMoney=70.0;
+input double InpDegradationB1ConfirmLossMoney=90.0;
+input int    InpDegradationB1ConfirmMinSeconds=60;
+input int    InpDegradationB1ConfirmMaxSeconds=120;
+
+// B2 - Sustained M1 collapse: consecutive adverse 60-second moves + 1-minute confirmation.
+input double InpDegradationB2WindowMinutes=30.0;
+input int    InpDegradationB2ConsecutiveMoves=5;
+input double InpDegradationB2InitialAdversePips=10.0;
+input double InpDegradationB2RearmedAdversePips=15.0;
+input double InpDegradationB2ArmLossMoney=50.0;
+input double InpDegradationB2ConfirmLossMoney=70.0;
+input int    InpDegradationB2ConfirmMinSeconds=60;
+input int    InpDegradationB2ConfirmMaxSeconds=120;
+
+// C - Failed recovery: after -20, recovery to at least -15 re-arms B1/B2 on the next -20 break.
+input double InpDegradationCRecoveryMoney=15.0;
+
+// D2 - after the existing 1h failure filter arms, close if P/L deteriorates another 30 within 20 min.
+input double InpDegradationD2AdditionalLossMoney=30.0;
+input double InpDegradationD2WindowMinutes=20.0;

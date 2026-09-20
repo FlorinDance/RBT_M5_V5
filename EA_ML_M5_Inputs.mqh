@@ -1445,7 +1445,7 @@ bool   InpDynSL_LogLateSessionWeakWideSLBuyReclassify = false;
 
 #endif // __EA_ML_M5_INPUTS_MQH__
 
-// V5.10.21: mutually exclusive live management modes. Monetary values use account currency.
+// V5.10.22: mutually exclusive live management modes. Monetary values use account currency.
 // Modes 0/1/2 keep their validated behavior unchanged.
 // Modes 3/4 are global profit protection alternatives.
 // Mode 5 overlays global +10/+5 on RECOVERY_ONLY.
@@ -1533,3 +1533,6 @@ input double InpDegradationCRecoveryMoney=15.0;
 // D2 - after the existing 1h failure filter arms, close if P/L deteriorates another 30 within 20 min.
 input double InpDegradationD2AdditionalLossMoney=30.0;
 input double InpDegradationD2WindowMinutes=20.0;
+
+// After a B1/B2/D2 live close, block all new entries on this symbol/magic for N minutes.
+input double InpDegradationPostCloseCooldownMinutes=5.0;

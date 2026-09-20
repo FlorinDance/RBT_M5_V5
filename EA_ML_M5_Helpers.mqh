@@ -88,6 +88,70 @@ bool HasOpenPositionOnSymbol()
    return false;
 }
 //------------------------------------------------------------------//
+// v5.10.22 degradation post-close cooldown.
+// Shared by the Recovery manager (arms it) and the entry path (enforces it).
+datetime g_degradationEntryCooldownUntil = 0;
+
+string DegradationEntryCooldownKey()
+{
+   return StringFormat("RBT.DGCD.%I64d.%s.%I64d",
+                       AccountInfoInteger(ACCOUNT_LOGIN),_Symbol,InpMagicNumber);
+}
+
+void DegradationEntryCooldownInitialize()
+{
+   g_degradationEntryCooldownUntil=0;
+   if(!InpDegradationProtection ||
+      InpRecoveryMode!=RECOVERY_GLOBAL_LOCK_RECOVERY_DEGRADATION_TIME_STOP)
+      return;
+   if(MQLInfoInteger(MQL_TESTER)) return;
+
+   const string key=DegradationEntryCooldownKey();
+   if(!GlobalVariableCheck(key)) return;
+
+   const datetime until=(datetime)GlobalVariableGet(key);
+   if(until>TimeCurrent())
+      g_degradationEntryCooldownUntil=until;
+   else
+      GlobalVariableDel(key);
+}
+
+void DegradationEntryCooldownArm(const datetime now)
+{
+   if(InpDegradationPostCloseCooldownMinutes<=0.0) return;
+   const datetime until=now+(datetime)MathRound(InpDegradationPostCloseCooldownMinutes*60.0);
+   if(until<=g_degradationEntryCooldownUntil) return;
+
+   g_degradationEntryCooldownUntil=until;
+   if(!MQLInfoInteger(MQL_TESTER))
+   {
+      GlobalVariableSet(DegradationEntryCooldownKey(),(double)until);
+      GlobalVariablesFlush();
+   }
+}
+
+bool DegradationEntryCooldownActive(int &secondsRemaining)
+{
+   secondsRemaining=0;
+   if(!InpDegradationProtection ||
+      InpRecoveryMode!=RECOVERY_GLOBAL_LOCK_RECOVERY_DEGRADATION_TIME_STOP)
+      return false;
+   if(g_degradationEntryCooldownUntil<=0) return false;
+
+   const datetime now=TimeCurrent();
+   if(now>=g_degradationEntryCooldownUntil)
+   {
+      g_degradationEntryCooldownUntil=0;
+      if(!MQLInfoInteger(MQL_TESTER))
+         GlobalVariableDel(DegradationEntryCooldownKey());
+      return false;
+   }
+
+   secondsRemaining=(int)(g_degradationEntryCooldownUntil-now);
+   return true;
+}
+
+//------------------------------------------------------------------//
 //+------------------------------------------------------------------+
 //| CopyOneBufferValue
 //| Copiază o singură valoare dintr-un buffer de indicator MT5.

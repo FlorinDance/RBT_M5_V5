@@ -759,6 +759,14 @@ bool OpenTradeFromDecision(
       return false;
    }
 
+   int degradationCooldownSeconds=0;
+   if(DegradationEntryCooldownActive(degradationCooldownSeconds))
+   {
+      PrintFormat("ML skip: degradation post-close cooldown active | remaining=%ds",
+                  degradationCooldownSeconds);
+      return false;
+   }
+
    if(InpOnlyOnePosition && HasOpenPositionOnSymbol())
    {
       Print("ML skip: already open position on symbol.");

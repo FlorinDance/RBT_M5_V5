@@ -21,12 +21,13 @@ struct RecoveryState
    datetime failureSampleTime[RBT_RECOVERY_FAILURE_MAX_SAMPLES];
    double   failureSampleMoney[RBT_RECOVERY_FAILURE_MAX_SAMPLES];
 
-   // v5.10.21 live degradation detector state (mode 7).
+   // v5.10.22 live degradation detector state (mode 7).
    bool     degradationSegmentActive;
    datetime degradationSegmentStart;
    bool     degradationSegmentRearmed;
    bool     degradationRecoverySeen;
    bool     degradationAboveLossSeen;
+   bool     degradationB2AboveLossSampled;
    bool     degradationAWarningLogged;
    bool     degradationB1Attempted;
    datetime degradationB1CandidateTime;
@@ -92,6 +93,7 @@ void RecoveryDegradationReset(const int i)
    recoveryStates[i].degradationSegmentRearmed=false;
    recoveryStates[i].degradationRecoverySeen=false;
    recoveryStates[i].degradationAboveLossSeen=false;
+   recoveryStates[i].degradationB2AboveLossSampled=false;
    recoveryStates[i].degradationAWarningLogged=false;
    recoveryStates[i].degradationB1Attempted=false;
    recoveryStates[i].degradationB1CandidateTime=0;
@@ -565,13 +567,13 @@ string RecoveryDegradationName(const int stage)
    return "DEGRADATION";
 }
 
-void RecoveryDegradationAddSample(const int i,const datetime now,
+bool RecoveryDegradationAddSample(const int i,const datetime now,
                                   const double market,const bool force=false)
 {
-   if(!RecoveryDegradationEnabled()) return;
+   if(!RecoveryDegradationEnabled()) return false;
    const datetime last=recoveryStates[i].degradationLastSample;
-   if(last==now) return;
-   if(!force && last>0 && (now-last)<InpDegradationSampleSeconds) return;
+   if(last==now) return false;
+   if(!force && last>0 && (now-last)<InpDegradationSampleSeconds) return false;
 
    int count=recoveryStates[i].degradationSampleCount;
    if(count>=RBT_RECOVERY_DEGRADATION_MAX_SAMPLES)
@@ -588,6 +590,7 @@ void RecoveryDegradationAddSample(const int i,const datetime now,
    recoveryStates[i].degradationSamplePrice[count]=market;
    recoveryStates[i].degradationSampleCount=count+1;
    recoveryStates[i].degradationLastSample=now;
+   return true;
 }
 
 void RecoveryDegradationStartSegment(const int i,const datetime startTime,
@@ -598,6 +601,7 @@ void RecoveryDegradationStartSegment(const int i,const datetime startTime,
    recoveryStates[i].degradationSegmentRearmed=rearmed;
    recoveryStates[i].degradationRecoverySeen=false;
    recoveryStates[i].degradationAboveLossSeen=false;
+   recoveryStates[i].degradationB2AboveLossSampled=false;
    recoveryStates[i].degradationAWarningLogged=false;
    recoveryStates[i].degradationB1Attempted=false;
    recoveryStates[i].degradationB1CandidateTime=0;
@@ -620,9 +624,14 @@ bool RecoveryDegradationAttemptClose(const int i,const ulong ticket,
    const string name=RecoveryDegradationName(stage);
    const bool ok=trade.PositionClose(ticket);
    const uint code=trade.ResultRetcode();
+   const bool executed=(ok && (code==TRADE_RETCODE_DONE || code==TRADE_RETCODE_DONE_PARTIAL));
    RecoveryLog(ticket,stage,
-      name+((ok && (code==TRADE_RETCODE_DONE || code==TRADE_RETCODE_DONE_PARTIAL))
-              ?"_CLOSE_EXECUTED":"_CLOSE_RETRY"),money,0.0);
+      name+(executed?"_CLOSE_EXECUTED":"_CLOSE_RETRY"),money,0.0);
+   if(executed)
+   {
+      DegradationEntryCooldownArm(TimeCurrent());
+      RecoveryLog(ticket,stage,"DEGRADATION_ENTRY_COOLDOWN_ARMED",money,0.0);
+   }
    return true;
 }
 
@@ -743,7 +752,14 @@ bool RecoveryProcessDegradation(const int i,const ulong ticket,const double mone
       RecoveryLog(ticket,33,"DEGRADATION_C_REARM",money,0.0);
    }
 
-   RecoveryDegradationAddSample(i,now,market);
+   // v5.10.22: B2 recovery/invalidation is sampled at the configured cadence
+   // (60 s by default), matching the offline replay. Brief intra-sample ticks
+   // above -20 no longer permanently disable B2. A/C/B1 keep their prior
+   // tick-level behavior.
+   const bool degradationSampleAdded=RecoveryDegradationAddSample(i,now,market);
+   if(degradationSampleAdded && money>-lossThreshold)
+      recoveryStates[i].degradationB2AboveLossSampled=true;
+
    RecoveryDegradationCheckA(i,ticket,money,scale,buy);
 
    const double segmentAge=(double)(now-recoveryStates[i].degradationSegmentStart)/60.0;
@@ -777,7 +793,7 @@ bool RecoveryProcessDegradation(const int i,const ulong ticket,const double mone
    if(recoveryStates[i].degradationB2CandidateTime>0)
    {
       const int elapsed=(int)(now-recoveryStates[i].degradationB2CandidateTime);
-      if(money>-lossThreshold)
+      if(degradationSampleAdded && money>-lossThreshold)
       {
          recoveryStates[i].degradationB2CandidateTime=0;
       }
@@ -794,7 +810,7 @@ bool RecoveryProcessDegradation(const int i,const ulong ticket,const double mone
 
    if(recoveryStates[i].degradationB2CandidateTime==0 &&
       segmentAge<=InpDegradationB2WindowMinutes &&
-      !recoveryStates[i].degradationAboveLossSeen &&
+      !recoveryStates[i].degradationB2AboveLossSampled &&
       money<=-InpDegradationB2ArmLossMoney*scale)
    {
       double adversePips=0.0;
@@ -977,6 +993,8 @@ bool RecoveryValidateInputs(string &reason)
       else if(InpDegradationB2ConfirmMinSeconds<1 ||
               InpDegradationB2ConfirmMaxSeconds<InpDegradationB2ConfirmMinSeconds)
          reason="B2 confirmation timing is invalid";
+      else if(InpDegradationPostCloseCooldownMinutes<0.0)
+         reason="InpDegradationPostCloseCooldownMinutes must be >= 0";
       else if(InpDegradationCRecoveryMoney<=0.0 ||
               InpDegradationCRecoveryMoney>=InpRecoveryLossMoney)
          reason="InpDegradationCRecoveryMoney must be in (0, RecoveryLossMoney)";

@@ -88,7 +88,7 @@ bool HasOpenPositionOnSymbol()
    return false;
 }
 //------------------------------------------------------------------//
-// v5.10.22 degradation post-close cooldown.
+// v5.10.23 degradation post-close cooldown.
 // Shared by the Recovery manager (arms it) and the entry path (enforces it).
 datetime g_degradationEntryCooldownUntil = 0;
 
@@ -116,10 +116,10 @@ void DegradationEntryCooldownInitialize()
       GlobalVariableDel(key);
 }
 
-void DegradationEntryCooldownArm(const datetime now)
+void DegradationEntryCooldownArm(const datetime now,const double cooldownMinutes)
 {
-   if(InpDegradationPostCloseCooldownMinutes<=0.0) return;
-   const datetime until=now+(datetime)MathRound(InpDegradationPostCloseCooldownMinutes*60.0);
+   if(cooldownMinutes<=0.0) return;
+   const datetime until=now+(datetime)MathRound(cooldownMinutes*60.0);
    if(until<=g_degradationEntryCooldownUntil) return;
 
    g_degradationEntryCooldownUntil=until;

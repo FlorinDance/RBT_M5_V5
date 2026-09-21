@@ -1,0 +1,11 @@
+v5.10.23
+========
+
+- B1 LIVE confirmation now requires 2 consecutive degradation samples <= -80 (default sampling 60 s) after the existing <= -70 early arm.
+- Removed the old single-confirmation B1 timing rule (60..120 s / <= -90).
+- B1/B2 cooldown remains 5 minutes by default via InpDegradationPostCloseCooldownMinutes.
+- Added separate InpDegradationD2PostCloseCooldownMinutes, default 15 minutes.
+- 10h05 hard timeout remains 605 minutes by design.
+- B2 logic and thresholds unchanged.
+- D2 degradation thresholds unchanged (+30 within 20m after failure arm).
+- Recovery -20, failure activation -35 at 60m, and global +10 -> +5 unchanged.

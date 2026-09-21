@@ -1445,7 +1445,7 @@ bool   InpDynSL_LogLateSessionWeakWideSLBuyReclassify = false;
 
 #endif // __EA_ML_M5_INPUTS_MQH__
 
-// V5.10.22: mutually exclusive live management modes. Monetary values use account currency.
+// V5.10.23: mutually exclusive live management modes. Monetary values use account currency.
 // Modes 0/1/2 keep their validated behavior unchanged.
 // Modes 3/4 are global profit protection alternatives.
 // Mode 5 overlays global +10/+5 on RECOVERY_ONLY.
@@ -1510,12 +1510,12 @@ input int    InpDegradationAConsecutiveM5Moves=2;
 input double InpDegradationAAdversePips=10.0;
 input double InpDegradationALossMoney=90.0;
 
-// B1 - Fast shock: early deep loss, then still deeply negative after ~1 minute.
+// B1 - Fast shock: arm early, then require consecutive sampled confirmation.
+// Default: arm <= -70 within 3 minutes, then 2 consecutive 60-second samples <= -80.
 input double InpDegradationB1FirstWindowMinutes=3.0;
 input double InpDegradationB1FirstLossMoney=70.0;
-input double InpDegradationB1ConfirmLossMoney=90.0;
-input int    InpDegradationB1ConfirmMinSeconds=60;
-input int    InpDegradationB1ConfirmMaxSeconds=120;
+input double InpDegradationB1ConfirmLossMoney=80.0;
+input int    InpDegradationB1ConfirmSamples=2;
 
 // B2 - Sustained M1 collapse: consecutive adverse 60-second moves + 1-minute confirmation.
 input double InpDegradationB2WindowMinutes=30.0;
@@ -1534,5 +1534,6 @@ input double InpDegradationCRecoveryMoney=15.0;
 input double InpDegradationD2AdditionalLossMoney=30.0;
 input double InpDegradationD2WindowMinutes=20.0;
 
-// After a B1/B2/D2 live close, block all new entries on this symbol/magic for N minutes.
-input double InpDegradationPostCloseCooldownMinutes=5.0;
+// Post-close entry cooldowns. B1/B2 keep the short cooldown; D2 uses a longer one.
+input double InpDegradationPostCloseCooldownMinutes=5.0;      // B1/B2
+input double InpDegradationD2PostCloseCooldownMinutes=15.0;  // D2

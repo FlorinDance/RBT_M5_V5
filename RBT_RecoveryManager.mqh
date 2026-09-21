@@ -21,7 +21,7 @@ struct RecoveryState
    datetime failureSampleTime[RBT_RECOVERY_FAILURE_MAX_SAMPLES];
    double   failureSampleMoney[RBT_RECOVERY_FAILURE_MAX_SAMPLES];
 
-   // v5.10.22 live degradation detector state (mode 7).
+   // v5.10.23 live degradation detector state (mode 7).
    bool     degradationSegmentActive;
    datetime degradationSegmentStart;
    bool     degradationSegmentRearmed;
@@ -31,6 +31,7 @@ struct RecoveryState
    bool     degradationAWarningLogged;
    bool     degradationB1Attempted;
    datetime degradationB1CandidateTime;
+   int      degradationB1ConfirmCount;
    datetime degradationB2CandidateTime;
    datetime degradationLastSample;
    int      degradationSampleCount;
@@ -97,6 +98,7 @@ void RecoveryDegradationReset(const int i)
    recoveryStates[i].degradationAWarningLogged=false;
    recoveryStates[i].degradationB1Attempted=false;
    recoveryStates[i].degradationB1CandidateTime=0;
+   recoveryStates[i].degradationB1ConfirmCount=0;
    recoveryStates[i].degradationB2CandidateTime=0;
    recoveryStates[i].degradationLastSample=0;
    recoveryStates[i].degradationSampleCount=0;
@@ -605,6 +607,7 @@ void RecoveryDegradationStartSegment(const int i,const datetime startTime,
    recoveryStates[i].degradationAWarningLogged=false;
    recoveryStates[i].degradationB1Attempted=false;
    recoveryStates[i].degradationB1CandidateTime=0;
+   recoveryStates[i].degradationB1ConfirmCount=0;
    recoveryStates[i].degradationB2CandidateTime=0;
    recoveryStates[i].degradationLastSample=0;
    recoveryStates[i].degradationSampleCount=0;
@@ -629,7 +632,10 @@ bool RecoveryDegradationAttemptClose(const int i,const ulong ticket,
       name+(executed?"_CLOSE_EXECUTED":"_CLOSE_RETRY"),money,0.0);
    if(executed)
    {
-      DegradationEntryCooldownArm(TimeCurrent());
+      const double cooldownMinutes=(stage==34
+         ?InpDegradationD2PostCloseCooldownMinutes
+         :InpDegradationPostCloseCooldownMinutes);
+      DegradationEntryCooldownArm(TimeCurrent(),cooldownMinutes);
       RecoveryLog(ticket,stage,"DEGRADATION_ENTRY_COOLDOWN_ARMED",money,0.0);
    }
    return true;
@@ -752,7 +758,7 @@ bool RecoveryProcessDegradation(const int i,const ulong ticket,const double mone
       RecoveryLog(ticket,33,"DEGRADATION_C_REARM",money,0.0);
    }
 
-   // v5.10.22: B2 recovery/invalidation is sampled at the configured cadence
+   // v5.10.23: B2 recovery/invalidation is sampled at the configured cadence
    // (60 s by default), matching the offline replay. Brief intra-sample ticks
    // above -20 no longer permanently disable B2. A/C/B1 keep their prior
    // tick-level behavior.
@@ -764,18 +770,25 @@ bool RecoveryProcessDegradation(const int i,const ulong ticket,const double mone
 
    const double segmentAge=(double)(now-recoveryStates[i].degradationSegmentStart)/60.0;
 
-   // B1 candidate and confirmation.
-   if(recoveryStates[i].degradationB1CandidateTime>0)
+   // B1 candidate and sampled confirmation. Once armed, require N consecutive
+   // degradation samples at/below the confirmation loss. A sampled rebound above
+   // the threshold cancels this B1 attempt; C can re-arm B1 on a later failed recovery.
+   if(recoveryStates[i].degradationB1CandidateTime>0 && degradationSampleAdded)
    {
-      const int elapsed=(int)(now-recoveryStates[i].degradationB1CandidateTime);
-      if(elapsed>InpDegradationB1ConfirmMaxSeconds)
+      if(money<=-InpDegradationB1ConfirmLossMoney*scale)
       {
-         recoveryStates[i].degradationB1CandidateTime=0;
+         recoveryStates[i].degradationB1ConfirmCount++;
+         RecoveryLog(ticket,31,
+            StringFormat("DEGRADATION_B1_CONFIRM_%d",recoveryStates[i].degradationB1ConfirmCount),
+            money,0.0);
+         if(recoveryStates[i].degradationB1ConfirmCount>=InpDegradationB1ConfirmSamples)
+            return RecoveryDegradationAttemptClose(i,ticket,money,31);
       }
-      else if(elapsed>=InpDegradationB1ConfirmMinSeconds &&
-              money<=-InpDegradationB1ConfirmLossMoney*scale)
+      else
       {
-         return RecoveryDegradationAttemptClose(i,ticket,money,31);
+         RecoveryLog(ticket,31,"DEGRADATION_B1_CONFIRM_CANCELLED",money,0.0);
+         recoveryStates[i].degradationB1CandidateTime=0;
+         recoveryStates[i].degradationB1ConfirmCount=0;
       }
    }
    if(!recoveryStates[i].degradationB1Attempted &&
@@ -785,6 +798,7 @@ bool RecoveryProcessDegradation(const int i,const ulong ticket,const double mone
    {
       recoveryStates[i].degradationB1Attempted=true;
       recoveryStates[i].degradationB1CandidateTime=now;
+      recoveryStates[i].degradationB1ConfirmCount=0;
       RecoveryLog(ticket,31,"DEGRADATION_B1_ARMED",money,0.0);
    }
 
@@ -979,9 +993,9 @@ bool RecoveryValidateInputs(string &reason)
               InpDegradationB1FirstLossMoney<=InpRecoveryLossMoney ||
               InpDegradationB1ConfirmLossMoney<=InpDegradationB1FirstLossMoney)
          reason="B1 degradation thresholds are invalid";
-      else if(InpDegradationB1ConfirmMinSeconds<1 ||
-              InpDegradationB1ConfirmMaxSeconds<InpDegradationB1ConfirmMinSeconds)
-         reason="B1 confirmation timing is invalid";
+      else if(InpDegradationB1ConfirmSamples<1 ||
+              InpDegradationB1ConfirmSamples>=RBT_RECOVERY_DEGRADATION_MAX_SAMPLES)
+         reason="InpDegradationB1ConfirmSamples is invalid";
       else if(InpDegradationB2WindowMinutes<=0.0 ||
               InpDegradationB2ConsecutiveMoves<2 ||
               InpDegradationB2ConsecutiveMoves>=RBT_RECOVERY_DEGRADATION_MAX_SAMPLES ||
@@ -995,6 +1009,8 @@ bool RecoveryValidateInputs(string &reason)
          reason="B2 confirmation timing is invalid";
       else if(InpDegradationPostCloseCooldownMinutes<0.0)
          reason="InpDegradationPostCloseCooldownMinutes must be >= 0";
+      else if(InpDegradationD2PostCloseCooldownMinutes<0.0)
+         reason="InpDegradationD2PostCloseCooldownMinutes must be >= 0";
       else if(InpDegradationCRecoveryMoney<=0.0 ||
               InpDegradationCRecoveryMoney>=InpRecoveryLossMoney)
          reason="InpDegradationCRecoveryMoney must be in (0, RecoveryLossMoney)";
